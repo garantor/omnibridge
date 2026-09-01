@@ -38,7 +38,7 @@ class OmnibridgeAgent:
         
         # 1. Resolve Route & Quote
         quote = self.route_finder.discover_route(intent)
-        src_chain_info = self.rpc_manager.get_chain_info(intent.source_chain)
+        src_chain_info = self.rpc_manager.discover_chain_metadata(intent.source_chain)
         if not src_chain_info:
             raise ValueError(f"Source chain {intent.source_chain} metadata not found")
 
