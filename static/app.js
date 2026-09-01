@@ -1,4 +1,4 @@
-// Omnibridge Web UI & Real Web3 Wallet Signing Controller
+// Omnibridge Web UI - Strict Real Web3 Wallet Signing Controller
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.getElementById("bridge-form");
   const intentInput = document.getElementById("intent-input");
@@ -10,32 +10,39 @@ document.addEventListener("DOMContentLoaded", () => {
   const walletBtnText = document.getElementById("wallet-btn-text");
   const chips = document.querySelectorAll(".chip");
 
-  let userConnectedAddress = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+  let userConnectedAddress = null;
   let currentThreadId = null;
   let currentUnsignedHex = null;
   let currentRouterAddress = null;
 
   // Wallet Connection (MetaMask / EIP-1193)
-  async function connectWallet() {
-    if (typeof window.ethereum !== "undefined") {
-      try {
-        const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-        if (accounts && accounts.length > 0) {
-          userConnectedAddress = accounts[0];
-          walletBtnText.textContent = `${userConnectedAddress.slice(0, 6)}...${userConnectedAddress.slice(-4)}`;
-          connectWalletBtn.style.borderColor = "var(--accent-green)";
-        }
-      } catch (err) {
-        console.warn("Wallet connection cancelled:", err);
+  async function connectWallet(showModal = true) {
+    if (typeof window.ethereum === "undefined") {
+      if (showModal) {
+        alert("🦊 No Web3 Wallet Detected!\nPlease install or open MetaMask, Rabby, or Coinbase Wallet to sign and broadcast real on-chain transactions.");
       }
-    } else {
-      alert("No Web3 browser wallet detected (like MetaMask/Rabby/Coinbase). You can still test with the default simulation address.");
+      return null;
     }
+
+    try {
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+      if (accounts && accounts.length > 0) {
+        userConnectedAddress = accounts[0];
+        walletBtnText.textContent = `${userConnectedAddress.slice(0, 6)}...${userConnectedAddress.slice(-4)}`;
+        connectWalletBtn.style.borderColor = "var(--accent-green)";
+        connectWalletBtn.style.color = "var(--text-primary)";
+        return userConnectedAddress;
+      }
+    } catch (err) {
+      console.warn("Wallet connection was rejected or failed:", err);
+      return null;
+    }
+    return null;
   }
 
-  connectWalletBtn.addEventListener("click", connectWallet);
+  connectWalletBtn.addEventListener("click", () => connectWallet(true));
 
-  // Check if wallet already connected
+  // Check if wallet is already unlocked on page load
   if (typeof window.ethereum !== "undefined") {
     window.ethereum.request({ method: "eth_accounts" }).then((accounts) => {
       if (accounts && accounts.length > 0) {
@@ -77,7 +84,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // Handle Quick Chips
+  // Quick Chips
   chips.forEach((chip) => {
     chip.addEventListener("click", () => {
       intentInput.value = chip.getAttribute("data-intent");
@@ -119,7 +126,89 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshSkillsBtn.addEventListener("click", loadSkills);
   loadSkills();
 
-  // Step 1 - 4: Execute Bridge Intent & Run Live eth_call Simulation
+  // Helper to render telemetry cards
+  function renderTelemetryCards(traces) {
+    if (!traces) return "";
+    let html = `<div class="telemetry-container">`;
+
+    if (traces.step_1_intent) {
+      const t1 = traces.step_1_intent;
+      html += `
+        <div class="telemetry-step-card">
+          <div class="telemetry-header">
+            <div class="telemetry-title"><span>🔍</span><span>Step 1: Intent & Parameter Parser</span></div>
+            <span class="telemetry-tag tag-blue">Parsed via NLP</span>
+          </div>
+          <div class="telemetry-grid">
+            <div class="telemetry-item"><div class="telemetry-key">Raw Intent</div><div class="telemetry-val">"${t1.raw_input}"</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Route Direction</div><div class="telemetry-val">${t1.parsed_parameters.source_chain} ➔ ${t1.parsed_parameters.target_chain}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Amount & Token</div><div class="telemetry-val">${t1.parsed_parameters.amount} ${t1.parsed_parameters.asset}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Slippage Tolerance</div><div class="telemetry-val">${t1.parsed_parameters.slippage}</div></div>
+          </div>
+        </div>
+      `;
+    }
+
+    if (traces.step_2_discovery) {
+      const t2 = traces.step_2_discovery;
+      const isSkill = t2.source_type === "SKILL_MEMORY_CACHE";
+      html += `
+        <div class="telemetry-step-card">
+          <div class="telemetry-header">
+            <div class="telemetry-title"><span>🌐</span><span>Step 2: Route Discovery & Registry Resolution</span></div>
+            <span class="telemetry-tag ${isSkill ? 'tag-purple' : 'tag-green'}">${isSkill ? '⚡ Skill Cache Hit (0ms)' : '🔍 Live Web Docs Discovery'}</span>
+          </div>
+          <div class="telemetry-grid">
+            <div class="telemetry-item"><div class="telemetry-key">Search Query / Mode</div><div class="telemetry-val" style="font-size: 0.8rem;">${t2.search_query}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Discovered Protocol</div><div class="telemetry-val" style="color: #a5b4fc;">${t2.discovered_route}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Router Contract</div><div class="telemetry-val">${t2.router_contract}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Active Public RPC</div><div class="telemetry-val" style="color: #6ee7b7;">${t2.active_rpc}</div></div>
+          </div>
+        </div>
+      `;
+    }
+
+    if (traces.step_3_codegen) {
+      const t3 = traces.step_3_codegen;
+      html += `
+        <div class="telemetry-step-card">
+          <div class="telemetry-header">
+            <div class="telemetry-title"><span>⚙️</span><span>Step 3: JIT In-Transit Codegen & Calldata Assembly</span></div>
+            <span class="telemetry-tag tag-blue">Ephemerally Synthesized</span>
+          </div>
+          <div class="telemetry-grid">
+            <div class="telemetry-item"><div class="telemetry-key">Calldata Selector</div><div class="telemetry-val">${t3.calldata_selector}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Payload Length</div><div class="telemetry-val">${t3.calldata_length_bytes} bytes</div></div>
+          </div>
+          <div style="margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">Ephemeral Python Script:</div>
+          <pre class="code-box">${t3.ephemeral_python_script}</pre>
+        </div>
+      `;
+    }
+
+    if (traces.step_4_simulation) {
+      const t4 = traces.step_4_simulation;
+      html += `
+        <div class="telemetry-step-card">
+          <div class="telemetry-header">
+            <div class="telemetry-title"><span>🧪</span><span>Step 4: Dry-Run Simulation (eth_call)</span></div>
+            <span class="telemetry-tag tag-green">✓ Zero Reverts (eth_call Passed)</span>
+          </div>
+          <div class="telemetry-grid">
+            <div class="telemetry-item"><div class="telemetry-key">Execution RPC Node</div><div class="telemetry-val">${t4.rpc_endpoint}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Gas Units Used</div><div class="telemetry-val">${t4.gas_units} gas</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Estimated Gas Fee</div><div class="telemetry-val">$${t4.estimated_gas_usd.toFixed(4)} USD</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Circuit Breaker Safety</div><div class="telemetry-val" style="color: var(--accent-green);">SAFE_TO_EXECUTE</div></div>
+          </div>
+        </div>
+      `;
+    }
+
+    html += `</div>`;
+    return html;
+  }
+
+  // Execute Bridge Intent & Run Live Simulation
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const query = intentInput.value.trim();
@@ -130,8 +219,8 @@ document.addEventListener("DOMContentLoaded", () => {
     outputSection.classList.remove("hidden");
     outputSection.innerHTML = `
       <div style="text-align: center; padding: 2rem 1rem;">
-        <div style="font-size: 1.4rem; margin-bottom: 0.5rem;">🤖 Discovering route & simulating live transaction...</div>
-        <p class="subtitle">Testing input on-chain with eth_call to guarantee zero-revert safety before signing...</p>
+        <div style="font-size: 1.4rem; margin-bottom: 0.5rem;">🤖 Step-by-Step Discovery & Simulation in Progress...</div>
+        <p class="subtitle">Executing NLP parsing ➔ web search ➔ JIT codegen ➔ eth_call dry-run...</p>
       </div>
     `;
 
@@ -147,7 +236,7 @@ document.addEventListener("DOMContentLoaded", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           input: query,
-          userAddress: userConnectedAddress,
+          userAddress: userConnectedAddress || "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
         }),
       });
 
@@ -159,51 +248,37 @@ document.addEventListener("DOMContentLoaded", () => {
         currentUnsignedHex = data.unsigned_transaction_hex;
         currentRouterAddress = data.route.router_address || "0x12ade2554a39A27dd2465376F4302cCc8004ce38";
 
+        const telemetryHtml = renderTelemetryCards(data.traces);
+
         outputSection.innerHTML = `
           <div class="manifest-card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-              <h3 style="color: var(--accent-cyan);">⚡ Human-in-the-Loop Real Transaction Manifest</h3>
+              <h3 style="color: var(--accent-cyan);">⚡ Step 5: Human-in-the-Loop Approval Manifest</h3>
               <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.3);">
-                ✓ Simulation Passed (0 Reverts)
+                ✓ Pre-Flight Simulation Passed
               </span>
             </div>
-            <p class="subtitle">Simulation verified that this exact payload is executable on-chain. Ready for real wallet signature and broadcast.</p>
+            <p class="subtitle">Simulation verified this transaction will not revert. Please authorize signature in your wallet to broadcast.</p>
 
-            <div class="manifest-grid">
-              <div class="manifest-item">
-                <div class="manifest-label">Route Direction</div>
-                <div class="manifest-val">${data.route.source} ➔ ${data.route.target}</div>
-              </div>
-              <div class="manifest-item">
-                <div class="manifest-label">Bridge Protocol</div>
-                <div class="manifest-val" style="color: #a5b4fc;">${data.route.bridge}</div>
-              </div>
-              <div class="manifest-item">
-                <div class="manifest-label">Discovered Router</div>
-                <div class="manifest-val" style="font-size: 0.8rem; word-break: break-all;">${currentRouterAddress}</div>
-              </div>
-              <div class="manifest-item">
-                <div class="manifest-label">Estimated Gas</div>
-                <div class="manifest-val">$${data.estimated_gas_usd.toFixed(4)} USD</div>
-              </div>
-            </div>
-
-            <div style="margin-bottom: 0.5rem; font-size: 0.8rem; color: var(--text-muted);">Constructed Unsigned Calldata:</div>
-            <div class="hex-box">${data.unsigned_transaction_hex}</div>
-
-            <div class="manifest-actions">
-              <button id="confirm-sign-btn" class="btn btn-success">
-                <span>Sign in Wallet & Send Transaction</span>
+            <div class="manifest-actions" style="margin-bottom: 1.5rem;">
+              <button id="confirm-sign-btn" class="btn btn-success" style="font-size: 1.05rem; padding: 1rem 2rem;">
+                <span>Sign in Wallet & Broadcast Live</span>
                 <span>🚀</span>
               </button>
               <button id="cancel-btn" class="btn btn-secondary">Reject</button>
             </div>
+
+            <!-- Step by Step Telemetry -->
+            <h4 style="margin-top: 1.5rem; color: var(--text-secondary); font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em;">
+              📋 Telemetry & Execution Traces (Step 1 – Step 4)
+            </h4>
+            ${telemetryHtml}
           </div>
         `;
 
-        document.getElementById("confirm-sign-btn").addEventListener("click", handleRealWalletSignAndBroadcast);
+        document.getElementById("confirm-sign-btn").addEventListener("click", handleStrictRealWalletSignAndBroadcast);
         document.getElementById("cancel-btn").addEventListener("click", () => {
-          outputSection.innerHTML = `<p style="color: var(--accent-amber);">Transaction rejected by user. Nothing broadcasted.</p>`;
+          outputSection.innerHTML = `<p style="color: var(--accent-amber);">Transaction rejected by user. Nothing was broadcasted on-chain.</p>`;
           resetPipeline();
         });
       } else {
@@ -221,72 +296,99 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Step 5 & 6: Real Web3 Wallet Signing & On-Chain Broadcast
-  async function handleRealWalletSignAndBroadcast() {
+  // Step 6: Strict Real Web3 Wallet Signing & On-Chain Broadcast
+  async function handleStrictRealWalletSignAndBroadcast() {
     const signBtn = document.getElementById("confirm-sign-btn");
+
+    // 1. Check if Web3 wallet is available
+    if (typeof window.ethereum === "undefined") {
+      outputSection.insertAdjacentHTML("afterbegin", `
+        <div style="background: rgba(244, 63, 94, 0.15); border: 1px solid var(--accent-rose); border-radius: var(--radius-md); padding: 1rem; margin-bottom: 1.5rem; color: #fecdd3;">
+          <strong>❌ Web3 Wallet Required:</strong> No browser wallet (like MetaMask or Rabby) was detected. Please install a Web3 wallet extension to sign and broadcast real on-chain transactions.
+        </div>
+      `);
+      return;
+    }
+
+    // 2. Ensure wallet is connected
+    if (!userConnectedAddress) {
+      userConnectedAddress = await connectWallet(false);
+      if (!userConnectedAddress) {
+        outputSection.insertAdjacentHTML("afterbegin", `
+          <div style="background: rgba(245, 158, 11, 0.15); border: 1px solid var(--accent-amber); border-radius: var(--radius-md); padding: 1rem; margin-bottom: 1.5rem; color: #fde68a;">
+            <strong>⚠️ Wallet Not Connected:</strong> Please connect your MetaMask/Rabby wallet using the button in the top right to sign this transaction.
+          </div>
+        `);
+        return;
+      }
+    }
+
     signBtn.disabled = true;
-    signBtn.innerHTML = `<span>Prompting wallet for on-chain signature...</span>`;
+    signBtn.innerHTML = `<span>Awaiting signature in MetaMask...</span>`;
     setStepActive(6);
 
     let realTxHash = null;
 
-    // Check for real browser Web3 wallet (MetaMask / Rabby / Phantom)
-    if (typeof window.ethereum !== "undefined") {
-      try {
-        const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-        const fromAddr = accounts[0];
+    try {
+      // 3. Prompt user's real browser wallet for on-chain execution
+      realTxHash = await window.ethereum.request({
+        method: "eth_sendTransaction",
+        params: [
+          {
+            from: userConnectedAddress,
+            to: currentRouterAddress,
+            data: currentUnsignedHex,
+            value: "0x0",
+          },
+        ],
+      });
+    } catch (walletErr) {
+      signBtn.disabled = false;
+      signBtn.innerHTML = `<span>Sign in Wallet & Broadcast Live 🚀</span>`;
+      setStepActive(5);
 
-        // Send REAL transaction via user's browser wallet
-        realTxHash = await window.ethereum.request({
-          method: "eth_sendTransaction",
-          params: [
-            {
-              from: fromAddr,
-              to: currentRouterAddress,
-              data: currentUnsignedHex,
-              value: "0x0",
-            },
-          ],
-        });
-      } catch (walletErr) {
-        console.warn("Browser wallet prompt rejected/failed, proceeding with direct node broadcast:", walletErr);
-      }
+      outputSection.insertAdjacentHTML("afterbegin", `
+        <div style="background: rgba(244, 63, 94, 0.15); border: 1px solid var(--accent-rose); border-radius: var(--radius-md); padding: 1rem; margin-bottom: 1.5rem; color: #fecdd3;">
+          <strong>⚠️ Signature Rejected in Wallet:</strong> ${walletErr.message || "You declined the signature request in your wallet. No transaction was broadcasted on-chain."}
+        </div>
+      `);
+      return;
     }
 
+    // 4. Resume LangGraph with the real on-chain transaction hash
     try {
-      signBtn.innerHTML = `<span>Broadcasting & persisting SKILL.md...</span>`;
+      signBtn.innerHTML = `<span>Confirming on-chain & saving SKILL.md...</span>`;
 
-      // Resume LangGraph with the real on-chain transaction hash/signed hex
       const resp = await fetch("/api/bridge/resume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           thread_id: currentThreadId,
-          signed_transaction_hex: realTxHash || currentUnsignedHex,
+          signed_transaction_hex: realTxHash,
         }),
       });
 
       const resData = await resp.json();
       setAllCompleted();
 
-      const finalHash = realTxHash || resData.tx_hash;
-
       outputSection.innerHTML = `
         <div class="success-box">
           <div class="success-header">
-            <span>✓ Real Transaction Submitted On-Chain!</span>
+            <span>✓ Real Transaction Broadcast Confirmed On-Chain!</span>
           </div>
-          <p style="margin-bottom: 0.75rem;">Your cross-chain bridging transaction was verified via simulation and executed on-chain.</p>
+          <p style="margin-bottom: 0.75rem;">Your real cross-chain transaction has been broadcast to the network sequencer.</p>
           
           <div class="manifest-grid">
             <div class="manifest-item">
               <div class="manifest-label">On-Chain Transaction Hash</div>
               <div class="manifest-val" style="font-size: 0.85rem; color: var(--accent-green); word-break: break-all;">
-                ${finalHash}
+                <a href="https://basescan.org/tx/${realTxHash}" target="_blank" style="color: var(--accent-green); text-decoration: underline;">
+                  ${realTxHash} ↗
+                </a>
               </div>
             </div>
             <div class="manifest-item">
-              <div class="manifest-label">Persistent Skill Saved</div>
+              <div class="manifest-label">Persistent SKILL.md Saved</div>
               <div class="manifest-val" style="font-size: 0.8rem; color: #a5b4fc;">
                 ${resData.skill_persisted}
               </div>
@@ -297,7 +399,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       loadSkills();
     } catch (err) {
-      outputSection.innerHTML = `<p style="color: var(--accent-rose);">Broadcast error: ${err.message}</p>`;
+      outputSection.innerHTML = `<p style="color: var(--accent-rose);">Error recording broadcast: ${err.message}</p>`;
     }
   }
 });

@@ -139,3 +139,34 @@ class CalldataExecutor:
             )
 
         return "0x"
+
+    @staticmethod
+    def generate_ephemeral_python_script(
+        rpc_url: str,
+        router_address: str,
+        calldata: str,
+        value_wei: int = 0,
+        chain_id: int = 8453,
+    ) -> str:
+        """Produces a standalone ephemeral Python script demonstrating the exact transaction construction."""
+        return f'''# Ephemeral Bridge Execution Script
+from web3 import Web3
+
+RPC_URL = "{rpc_url}"
+ROUTER_ADDRESS = "{router_address}"
+CALLDATA = "{calldata}"
+VALUE_WEI = {value_wei}
+CHAIN_ID = {chain_id}
+
+w3 = Web3(Web3.HTTPProvider(RPC_URL))
+
+def construct_payload(sender_address):
+    return {{
+        "chainId": CHAIN_ID,
+        "from": sender_address,
+        "to": Web3.to_checksum_address(ROUTER_ADDRESS),
+        "value": VALUE_WEI,
+        "data": CALLDATA,
+        "gas": 250000,
+    }}
+'''

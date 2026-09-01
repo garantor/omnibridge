@@ -58,10 +58,10 @@ def test_langgraph_bridge_flow():
 
     # 3. Simulate User Wallet Signing & Graph Resume
     console.print("\n[bold yellow]▶ STEP 5-6: Resuming Graph with Signed Transaction...[/bold yellow]")
-    mock_signed_hex = interrupt_payload["unsigned_transaction_hex"]
+    mock_signed_tx_hash = "0x" + "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
     
     final_output = None
-    for event in graph.stream(Command(resume={"signed_transaction_hex": mock_signed_hex}), config=config):
+    for event in graph.stream(Command(resume={"signed_transaction_hex": mock_signed_tx_hash}), config=config):
         node_name = list(event.keys())[0]
         console.print(f"  [green]✓ Resumed & Executed Node:[/green] [bold]{node_name}[/bold]")
         if node_name == "broadcast_skill_node":
