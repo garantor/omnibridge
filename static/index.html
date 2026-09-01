@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Omnibridge 🌉 Autonomous In-Transit Web3 Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <div class="logo-icon">🌉</div>
+        <div class="brand-text">
+          <h1>Omnibridge</h1>
+          <span class="badge">In-Transit Agentic Engine</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="connect-wallet-btn" class="btn btn-secondary">
+          <span id="wallet-icon">🦊</span>
+          <span id="wallet-btn-text">Connect Wallet</span>
+        </button>
+        <div class="header-status">
+          <span class="status-dot"></span>
+          <span class="status-text">Engine: Ready</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Natural Language Prompt Section -->
+      <section class="prompt-section card">
+        <div class="section-header">
+          <h2>Type Your Cross-Chain Intent</h2>
+          <p class="subtitle">Describe what you want to bridge in plain English. No pre-configured bridge SDKs or hardcoded routers.</p>
+        </div>
+
+        <form id="bridge-form" class="intent-form">
+          <div class="input-wrapper">
+            <input 
+              type="text" 
+              id="intent-input" 
+              placeholder="e.g. Bridge 100 USDC from Base to Solana" 
+              value="Bridge 50 USDC from Base to Solana"
+              required
+              autocomplete="off"
+            />
+            <button type="submit" id="execute-btn" class="btn btn-primary">
+              <span class="btn-text">Execute Intent</span>
+              <span class="btn-icon">⚡</span>
+            </button>
+          </div>
+
+          <!-- Quick Templates -->
+          <div class="quick-templates">
+            <span class="quick-label">Quick suggestions:</span>
+            <button type="button" class="chip" data-intent="Bridge 50 USDC from Base to Solana">Base ➔ Solana (50 USDC)</button>
+            <button type="button" class="chip" data-intent="Bridge 100 USDC from Base to Hyperliquid">Base ➔ Hyperliquid (100 USDC)</button>
+            <button type="button" class="chip" data-intent="Bridge 25 USDC from Base to Arbitrum">Base ➔ Arbitrum (25 USDC)</button>
+            <button type="button" class="chip" data-intent="Bridge 10 USDC from Stellar to Arbitrum">Stellar ➔ Arbitrum (10 USDC)</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Live Execution Pipeline Visualizer -->
+      <section class="pipeline-section card">
+        <h3 class="section-title">Execution Lifecycle</h3>
+        <div class="pipeline-tracker">
+          <div class="pipeline-step" id="step-1">
+            <div class="step-badge">1</div>
+            <div class="step-info">
+              <span class="step-title">Intent Parser</span>
+              <span class="step-detail">NLP Extraction</span>
+            </div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step" id="step-2">
+            <div class="step-badge">2</div>
+            <div class="step-info">
+              <span class="step-title">Discovery</span>
+              <span class="step-detail">Skill / Web Docs</span>
+            </div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step" id="step-3">
+            <div class="step-badge">3</div>
+            <div class="step-info">
+              <span class="step-title">JIT Codegen</span>
+              <span class="step-detail">Raw Hex Payload</span>
+            </div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step" id="step-4">
+            <div class="step-badge">4</div>
+            <div class="step-info">
+              <span class="step-title">Simulation</span>
+              <span class="step-detail">eth_call Dry-Run</span>
+            </div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step" id="step-5">
+            <div class="step-badge">5</div>
+            <div class="step-info">
+              <span class="step-title">HITL Approval</span>
+              <span class="step-detail">Wallet Sign Gate</span>
+            </div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step" id="step-6">
+            <div class="step-badge">6</div>
+            <div class="step-info">
+              <span class="step-title">Broadcast & Save</span>
+              <span class="step-detail">SKILL.md Cache</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Dynamic Output & Approval Area -->
+      <section id="output-section" class="output-section card hidden">
+        <!-- Injected dynamically via app.js -->
+      </section>
+
+      <!-- Persistent Skills Library -->
+      <section class="skills-section card">
+        <div class="section-header-flex">
+          <div>
+            <h3>Persistent SKILL.md Repository</h3>
+            <p class="subtitle">Learned, reusable cross-chain procedures persisted under open <code>agentskills.io</code> standard.</p>
+          </div>
+          <button id="refresh-skills-btn" class="btn btn-secondary">Refresh Skills</button>
+        </div>
+        <div id="skills-grid" class="skills-grid">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

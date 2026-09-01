@@ -32,8 +32,30 @@ class ResumeBridgeRequest(BaseModel):
     signed_transaction_hex: Optional[str] = None
 
 
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+if STATIC_DIR.exists():
+    server_app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
 @server_app.get("/")
 def root():
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(str(index_file))
+    return {
+        "service": "Omnibridge Headless LangGraph Bridging Engine",
+        "docs": "/docs",
+        "health": "/health",
+        "skills": "/api/skills",
+    }
+
+
+@server_app.get("/api")
+def api_info():
     return {
         "service": "Omnibridge Headless LangGraph Bridging Engine",
         "docs": "/docs",
