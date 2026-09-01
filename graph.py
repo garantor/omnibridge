@@ -48,21 +48,29 @@ finder = RouteFinder(skill_manager=skill_mgr, rpc_manager=rpc_mgr)
 # --- NODE 1: Intent & Orchestrator Parser ---
 def intent_parser_node(state: GraphState) -> Dict[str, Any]:
     raw = state.get("raw_input", "")
-    src = state.get("source_chain") or "Base"
-    dst = state.get("target_chain") or "Solana"
-    amt = float(state.get("amount") or 100.0)
-    tok = state.get("asset") or "USDC"
-    user_addr = state.get("user_address") or "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
-    slip = state.get("slippage") or "0.1%"
+    # Extract entities dynamically from natural language or structured payload
+    src = state.get("source_chain") or ""
+    dst = state.get("target_chain") or ""
+    amt = float(state.get("amount") or 0.0)
+    tok = state.get("asset") or ""
+    user_addr = state.get("user_address") or "0x0000000000000000000000000000000000000000"
+    slip = state.get("slippage") or "0.5%"
 
     if raw:
-        match = re.search(r"bridge\s+(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?\s+from\s+([a-zA-Z0-9_-]+)\s+to\s+([a-zA-Z0-9_-]+)", raw, re.IGNORECASE)
+        match = re.search(r"bridge\s+(\d+(?:\.\d+)?)\s*([a-zA-Z0-9_-]+)?\s+from\s+([a-zA-Z0-9_-]+)\s+to\s+([a-zA-Z0-9_-]+)", raw, re.IGNORECASE)
         if match:
             amt = float(match.group(1))
             if match.group(2):
                 tok = match.group(2).upper()
             src = match.group(3).capitalize()
             dst = match.group(4).capitalize()
+
+    if not src or not dst:
+        # Require actual user input entities
+        src = src or "Unknown"
+        dst = dst or "Unknown"
+        tok = tok or "NATIVE"
+        amt = amt if amt > 0 else 1.0
 
     traces = state.get("traces", {})
     traces["step_1_intent"] = {

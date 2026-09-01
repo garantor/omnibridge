@@ -67,7 +67,7 @@ def rpc_broadcaster(rpc_url: str, raw_payload_json: str, signed_tx_hex: Optional
     try:
         payload = json.loads(raw_payload_json)
     except Exception:
-        payload = {"chainId": 8453, "to": "0x12ade2554a39A27dd2465376F4302cCc8004ce38", "data": "0x"}
+        payload = {"chainId": 1, "to": "0x0000000000000000000000000000000000000000", "data": "0x"}
     receipt = signer.broadcast_transaction(payload, private_key=None, dry_run=True)
     return json.dumps(receipt.model_dump())
 

@@ -1,4 +1,58 @@
-// Omnibridge Web UI - Strict Real Web3 Wallet Signing Controller
+// Omnibridge Web UI - Powered by Blocknative Web3-Onboard
+import Onboard from "https://esm.sh/@web3-onboard/core@2.22.3";
+import injectedModule from "https://esm.sh/@web3-onboard/injected-wallets@2.11.2";
+
+// Initialize Blocknative Injected Wallets (MetaMask, Rabby, Coinbase, Brave, Phantom, Frame, etc.)
+const injected = injectedModule();
+
+// Initialize Blocknative Onboard instance
+const onboard = Onboard({
+  wallets: [injected],
+  chains: [
+    {
+      id: "0x2105", // 8453 (Base)
+      token: "ETH",
+      label: "Base",
+      rpcUrl: "https://mainnet.base.org",
+    },
+    {
+      id: "0xa4b1", // 42161 (Arbitrum One)
+      token: "ETH",
+      label: "Arbitrum One",
+      rpcUrl: "https://arb1.arbitrum.io/rpc",
+    },
+    {
+      id: "0x1", // 1 (Ethereum)
+      token: "ETH",
+      label: "Ethereum Mainnet",
+      rpcUrl: "https://eth.llamarpc.com",
+    },
+    {
+      id: "0xa", // 10 (Optimism)
+      token: "ETH",
+      label: "Optimism",
+      rpcUrl: "https://mainnet.optimism.io",
+    },
+    {
+      id: "0x89", // 137 (Polygon)
+      token: "POL",
+      label: "Polygon",
+      rpcUrl: "https://polygon-rpc.com",
+    },
+  ],
+  appMetadata: {
+    name: "Omnibridge",
+    icon: "<svg width='40' height='40' viewBox='0 0 40 40' fill='none' xmlns='http://www.w3.org/2000/svg'><rect width='40' height='40' rx='8' fill='%236366F1'/><path d='M10 26L20 14L30 26' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/></svg>",
+    description: "Autonomous In-Transit Web3 Cross-Chain Execution Gateway",
+    recommendedInjectedWallets: [
+      { name: "MetaMask", url: "https://metamask.io" },
+      { name: "Coinbase", url: "https://wallet.coinbase.com/" },
+      { name: "Rabby", url: "https://rabby.io" },
+    ],
+  },
+  theme: "dark",
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.getElementById("bridge-form");
   const intentInput = document.getElementById("intent-input");
@@ -15,43 +69,38 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentUnsignedHex = null;
   let currentRouterAddress = null;
 
-  // Wallet Connection (MetaMask / EIP-1193)
-  async function connectWallet(showModal = true) {
-    if (typeof window.ethereum === "undefined") {
-      if (showModal) {
-        alert("🦊 No Web3 Wallet Detected!\nPlease install or open MetaMask, Rabby, or Coinbase Wallet to sign and broadcast real on-chain transactions.");
-      }
-      return null;
+  // Blocknative Subscription for reactive wallet state
+  const state = onboard.state.select("wallets");
+  state.subscribe((wallets) => {
+    if (wallets && wallets.length > 0 && wallets[0].accounts.length > 0) {
+      userConnectedAddress = wallets[0].accounts[0].address;
+      walletBtnText.textContent = `${userConnectedAddress.slice(0, 6)}...${userConnectedAddress.slice(-4)}`;
+      connectWalletBtn.style.borderColor = "var(--accent-green)";
+      connectWalletBtn.style.color = "var(--text-primary)";
+      connectWalletBtn.style.background = "rgba(16, 185, 129, 0.12)";
+    } else {
+      userConnectedAddress = null;
+      walletBtnText.textContent = "Connect Wallet";
+      connectWalletBtn.style.borderColor = "var(--border-color)";
+      connectWalletBtn.style.background = "var(--bg-secondary)";
     }
+  });
 
+  // Connect Wallet via Blocknative Onboard
+  async function triggerBlocknativeConnect() {
     try {
-      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-      if (accounts && accounts.length > 0) {
-        userConnectedAddress = accounts[0];
-        walletBtnText.textContent = `${userConnectedAddress.slice(0, 6)}...${userConnectedAddress.slice(-4)}`;
-        connectWalletBtn.style.borderColor = "var(--accent-green)";
-        connectWalletBtn.style.color = "var(--text-primary)";
+      const wallets = await onboard.connectWallet();
+      if (wallets && wallets[0] && wallets[0].accounts.length > 0) {
+        userConnectedAddress = wallets[0].accounts[0].address;
         return userConnectedAddress;
       }
     } catch (err) {
-      console.warn("Wallet connection was rejected or failed:", err);
-      return null;
+      console.warn("Blocknative connection error:", err);
     }
     return null;
   }
 
-  connectWalletBtn.addEventListener("click", () => connectWallet(true));
-
-  // Check if wallet is already unlocked on page load
-  if (typeof window.ethereum !== "undefined") {
-    window.ethereum.request({ method: "eth_accounts" }).then((accounts) => {
-      if (accounts && accounts.length > 0) {
-        userConnectedAddress = accounts[0];
-        walletBtnText.textContent = `${userConnectedAddress.slice(0, 6)}...${userConnectedAddress.slice(-4)}`;
-        connectWalletBtn.style.borderColor = "var(--accent-green)";
-      }
-    });
-  }
+  connectWalletBtn.addEventListener("click", triggerBlocknativeConnect);
 
   // Pipeline step elements
   const steps = [
@@ -64,9 +113,7 @@ document.addEventListener("DOMContentLoaded", () => {
   ];
 
   function resetPipeline() {
-    steps.forEach((s) => {
-      s.classList.remove("active", "completed");
-    });
+    steps.forEach((s) => s.classList.remove("active", "completed"));
   }
 
   function setStepActive(stepNum) {
@@ -126,7 +173,7 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshSkillsBtn.addEventListener("click", loadSkills);
   loadSkills();
 
-  // Helper to render telemetry cards
+  // Render Telemetry Cards
   function renderTelemetryCards(traces) {
     if (!traces) return "";
     let html = `<div class="telemetry-container">`;
@@ -159,7 +206,7 @@ document.addEventListener("DOMContentLoaded", () => {
             <span class="telemetry-tag ${isSkill ? 'tag-purple' : 'tag-green'}">${isSkill ? '⚡ Skill Cache Hit (0ms)' : '🔍 Live Web Docs Discovery'}</span>
           </div>
           <div class="telemetry-grid">
-            <div class="telemetry-item"><div class="telemetry-key">Search Query / Mode</div><div class="telemetry-val" style="font-size: 0.8rem;">${t2.search_query}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Search Mode</div><div class="telemetry-val" style="font-size: 0.8rem;">${t2.search_query}</div></div>
             <div class="telemetry-item"><div class="telemetry-key">Discovered Protocol</div><div class="telemetry-val" style="color: #a5b4fc;">${t2.discovered_route}</div></div>
             <div class="telemetry-item"><div class="telemetry-key">Router Contract</div><div class="telemetry-val">${t2.router_contract}</div></div>
             <div class="telemetry-item"><div class="telemetry-key">Active Public RPC</div><div class="telemetry-val" style="color: #6ee7b7;">${t2.active_rpc}</div></div>
@@ -246,7 +293,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (data.status === "AWAITING_USER_APPROVAL") {
         currentThreadId = data.thread_id;
         currentUnsignedHex = data.unsigned_transaction_hex;
-        currentRouterAddress = data.route.router_address || "0x12ade2554a39A27dd2465376F4302cCc8004ce38";
+        currentRouterAddress = data.route.router_address;
 
         const telemetryHtml = renderTelemetryCards(data.traces);
 
@@ -258,7 +305,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 ✓ Pre-Flight Simulation Passed
               </span>
             </div>
-            <p class="subtitle">Simulation verified this transaction will not revert. Please authorize signature in your wallet to broadcast.</p>
+            <p class="subtitle">Simulation verified this transaction will not revert. Click below to sign with your connected wallet.</p>
 
             <div class="manifest-actions" style="margin-bottom: 1.5rem;">
               <button id="confirm-sign-btn" class="btn btn-success" style="font-size: 1.05rem; padding: 1rem 2rem;">
@@ -268,7 +315,6 @@ document.addEventListener("DOMContentLoaded", () => {
               <button id="cancel-btn" class="btn btn-secondary">Reject</button>
             </div>
 
-            <!-- Step by Step Telemetry -->
             <h4 style="margin-top: 1.5rem; color: var(--text-secondary); font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em;">
               📋 Telemetry & Execution Traces (Step 1 – Step 4)
             </h4>
@@ -276,7 +322,7 @@ document.addEventListener("DOMContentLoaded", () => {
           </div>
         `;
 
-        document.getElementById("confirm-sign-btn").addEventListener("click", handleStrictRealWalletSignAndBroadcast);
+        document.getElementById("confirm-sign-btn").addEventListener("click", handleBlocknativeSignAndBroadcast);
         document.getElementById("cancel-btn").addEventListener("click", () => {
           outputSection.innerHTML = `<p style="color: var(--accent-amber);">Transaction rejected by user. Nothing was broadcasted on-chain.</p>`;
           resetPipeline();
@@ -296,46 +342,40 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Step 6: Strict Real Web3 Wallet Signing & On-Chain Broadcast
-  async function handleStrictRealWalletSignAndBroadcast() {
+  // Step 6: Real Web3 Wallet Signing & On-Chain Broadcast via Blocknative Provider
+  async function handleBlocknativeSignAndBroadcast() {
     const signBtn = document.getElementById("confirm-sign-btn");
+    let connectedWallets = onboard.state.get().wallets;
 
-    // 1. Check if Web3 wallet is available
-    if (typeof window.ethereum === "undefined") {
-      outputSection.insertAdjacentHTML("afterbegin", `
-        <div style="background: rgba(244, 63, 94, 0.15); border: 1px solid var(--accent-rose); border-radius: var(--radius-md); padding: 1rem; margin-bottom: 1.5rem; color: #fecdd3;">
-          <strong>❌ Web3 Wallet Required:</strong> No browser wallet (like MetaMask or Rabby) was detected. Please install a Web3 wallet extension to sign and broadcast real on-chain transactions.
-        </div>
-      `);
-      return;
-    }
-
-    // 2. Ensure wallet is connected
-    if (!userConnectedAddress) {
-      userConnectedAddress = await connectWallet(false);
-      if (!userConnectedAddress) {
+    // If wallet not connected yet, trigger Blocknative modal
+    if (!connectedWallets || connectedWallets.length === 0) {
+      connectedWallets = await onboard.connectWallet();
+      if (!connectedWallets || connectedWallets.length === 0) {
         outputSection.insertAdjacentHTML("afterbegin", `
           <div style="background: rgba(245, 158, 11, 0.15); border: 1px solid var(--accent-amber); border-radius: var(--radius-md); padding: 1rem; margin-bottom: 1.5rem; color: #fde68a;">
-            <strong>⚠️ Wallet Not Connected:</strong> Please connect your MetaMask/Rabby wallet using the button in the top right to sign this transaction.
+            <strong>⚠️ Wallet Connection Required:</strong> Please connect your wallet in the Blocknative modal to authorize this transaction.
           </div>
         `);
         return;
       }
     }
 
+    const primaryWallet = connectedWallets[0];
+    const fromAddress = primaryWallet.accounts[0].address;
+    const provider = primaryWallet.provider;
+
     signBtn.disabled = true;
-    signBtn.innerHTML = `<span>Awaiting signature in MetaMask...</span>`;
+    signBtn.innerHTML = `<span>Awaiting signature in ${primaryWallet.label || "Wallet"}...</span>`;
     setStepActive(6);
 
     let realTxHash = null;
 
     try {
-      // 3. Prompt user's real browser wallet for on-chain execution
-      realTxHash = await window.ethereum.request({
+      realTxHash = await provider.request({
         method: "eth_sendTransaction",
         params: [
           {
-            from: userConnectedAddress,
+            from: fromAddress,
             to: currentRouterAddress,
             data: currentUnsignedHex,
             value: "0x0",
@@ -349,13 +389,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
       outputSection.insertAdjacentHTML("afterbegin", `
         <div style="background: rgba(244, 63, 94, 0.15); border: 1px solid var(--accent-rose); border-radius: var(--radius-md); padding: 1rem; margin-bottom: 1.5rem; color: #fecdd3;">
-          <strong>⚠️ Signature Rejected in Wallet:</strong> ${walletErr.message || "You declined the signature request in your wallet. No transaction was broadcasted on-chain."}
+          <strong>⚠️ Signature Rejected in Wallet:</strong> ${walletErr.message || "Transaction was cancelled in your wallet. Nothing broadcasted."}
         </div>
       `);
       return;
     }
 
-    // 4. Resume LangGraph with the real on-chain transaction hash
+    // Resume LangGraph with real on-chain transaction hash
     try {
       signBtn.innerHTML = `<span>Confirming on-chain & saving SKILL.md...</span>`;
 

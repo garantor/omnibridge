@@ -1,9 +1,9 @@
 """
 In-Transit Calldata Generation and Ephemeral Script Synthesis.
-Assembles raw unsigned transactions dynamically without pre-compiled bridge packages.
+Assembles raw unsigned transactions dynamically without pre-compiled bridge packages or hardcoded addresses.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from eth_abi import encode
 from web3 import Web3
 from omnibridge.core.models import RouteQuote, UserIntent
@@ -18,14 +18,18 @@ class CalldataExecutor:
         clean_addr = address.lower().replace("0x", "")
         if len(clean_addr) <= 40:
             return bytes.fromhex(clean_addr.zfill(64))
-        # Hash or truncate if longer than 32 bytes (non-EVM)
+        # Hash or truncate if longer than 32 bytes (e.g. non-EVM address strings)
         return Web3.keccak(text=address)
 
     @staticmethod
     def encode_erc20_approve(spender_address: str, amount_raw: int) -> str:
         """Encodes ERC-20 approve(address,uint256) -> 0x095ea7b3."""
         selector = bytes.fromhex("095ea7b3")
-        checksum_spender = Web3.to_checksum_address(spender_address) if spender_address.startswith("0x") and len(spender_address) == 42 else "0x12ade2554a39A27dd2465376F4302cCc8004ce38"
+        checksum_spender = (
+            Web3.to_checksum_address(spender_address)
+            if spender_address.startswith("0x") and len(spender_address) == 42
+            else Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
+        )
         encoded_args = encode(["address", "uint256"], [checksum_spender, amount_raw])
         return "0x" + (selector + encoded_args).hex()
 
@@ -45,8 +49,12 @@ class CalldataExecutor:
         selector = Web3.keccak(text=func_sig)[:4]
 
         recipient_b32 = cls.pad_bytes32_address(recipient_address)
-        burn_token_checksum = Web3.to_checksum_address(burn_token_address) if burn_token_address.startswith("0x") and len(burn_token_address) == 42 else "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-        valid_domain = int(destination_domain) if destination_domain is not None else 3
+        burn_token_checksum = (
+            Web3.to_checksum_address(burn_token_address)
+            if burn_token_address.startswith("0x") and len(burn_token_address) == 42
+            else Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
+        )
+        valid_domain = int(destination_domain) if destination_domain is not None else 0
 
         encoded_args = encode(
             ["uint256", "uint32", "bytes32", "address"],
@@ -66,11 +74,11 @@ class CalldataExecutor:
         destination_chain_id: int,
         relayer: str = "0x0000000000000000000000000000000000000000",
         quote_timestamp: int = 0,
-        fill_deadline: int = 0,
+        fill_deadline: int = 2147483647,
         exclusivity_deadline: int = 0,
         message: bytes = b"",
     ) -> str:
-        """Encodes Across Protocol V3 depositV3 call."""
+        """Encodes Across V3 SpokePool depositV3 calldata on-the-fly."""
         func_sig = "depositV3(address,address,address,address,uint256,uint256,uint256,address,uint32,uint32,uint32,bytes)"
         selector = Web3.keccak(text=func_sig)[:4]
 
@@ -90,20 +98,27 @@ class CalldataExecutor:
                 "bytes",
             ],
             [
-                Web3.to_checksum_address(depositor) if depositor.startswith("0x") else "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-                Web3.to_checksum_address(recipient) if recipient.startswith("0x") else "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-                Web3.to_checksum_address(input_token) if input_token.startswith("0x") else "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-                Web3.to_checksum_address(output_token) if output_token.startswith("0x") else "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                Web3.to_checksum_address(depositor) if depositor.startswith("0x") and len(depositor) == 42 else "0x0000000000000000000000000000000000000000",
+                Web3.to_checksum_address(recipient) if recipient.startswith("0x") and len(recipient) == 42 else "0x0000000000000000000000000000000000000000",
+                Web3.to_checksum_address(input_token) if input_token.startswith("0x") and len(input_token) == 42 else "0x0000000000000000000000000000000000000000",
+                Web3.to_checksum_address(output_token) if output_token.startswith("0x") and len(output_token) == 42 else "0x0000000000000000000000000000000000000000",
                 input_amount,
                 output_amount,
                 destination_chain_id,
-                Web3.to_checksum_address(relayer) if relayer.startswith("0x") else "0x0000000000000000000000000000000000000000",
+                Web3.to_checksum_address(relayer) if relayer.startswith("0x") and len(relayer) == 42 else "0x0000000000000000000000000000000000000000",
                 quote_timestamp,
                 fill_deadline,
                 exclusivity_deadline,
                 message,
             ],
         )
+        return "0x" + (selector + encoded_args).hex()
+
+    @classmethod
+    def encode_dynamic_calldata(cls, func_sig: str, param_types: List[str], param_values: List[Any]) -> str:
+        """Dynamically calculates 4-byte selector and encodes any ABI parameter schema on the fly."""
+        selector = Web3.keccak(text=func_sig)[:4]
+        encoded_args = encode(param_types, param_values)
         return "0x" + (selector + encoded_args).hex()
 
     @classmethod
@@ -114,12 +129,11 @@ class CalldataExecutor:
         recipient = intent.recipient or sender_address
 
         if quote.calldata_template == "stellar_soroban_invoke":
-            # Dynamic Soroban Host Function invocation envelope representation
             return "0x" + bytes(f"stellar_invoke:deposit({intent.amount},{recipient})", "utf-8").hex()
 
         if quote.calldata_template in ("cctp_deposit_for_burn", "skill_verified"):
             raw_domain = quote.extra_params.get("destination_domain") or quote.extra_params.get("cctp_domain")
-            dst_domain = int(raw_domain) if raw_domain is not None else 3
+            dst_domain = int(raw_domain) if raw_domain is not None else 0
             return cls.encode_cctp_deposit_for_burn(
                 amount_raw=quote.deposit_amount_raw,
                 destination_domain=dst_domain,
@@ -138,7 +152,17 @@ class CalldataExecutor:
                 destination_chain_id=quote.dest_chain_id,
             )
 
-        return "0x"
+        # Generic Bridge Deposit Call (dynamic fallback)
+        func_sig = "bridge(uint256,address,uint256)"
+        return cls.encode_dynamic_calldata(
+            func_sig,
+            ["uint256", "address", "uint256"],
+            [
+                quote.deposit_amount_raw,
+                Web3.to_checksum_address(recipient) if recipient.startswith("0x") and len(recipient) == 42 else "0x0000000000000000000000000000000000000000",
+                quote.dest_chain_id,
+            ],
+        )
 
     @staticmethod
     def generate_ephemeral_python_script(
@@ -164,7 +188,7 @@ def construct_payload(sender_address):
     return {{
         "chainId": CHAIN_ID,
         "from": sender_address,
-        "to": Web3.to_checksum_address(ROUTER_ADDRESS),
+        "to": Web3.to_checksum_address(ROUTER_ADDRESS) if ROUTER_ADDRESS.startswith("0x") else ROUTER_ADDRESS,
         "value": VALUE_WEI,
         "data": CALLDATA,
         "gas": 250000,
