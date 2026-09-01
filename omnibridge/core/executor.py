@@ -33,7 +33,7 @@ class CalldataExecutor:
     def encode_cctp_deposit_for_burn(
         cls,
         amount_raw: int,
-        destination_domain: int,
+        destination_domain: Optional[int],
         recipient_address: str,
         burn_token_address: str,
     ) -> str:
@@ -46,10 +46,11 @@ class CalldataExecutor:
 
         recipient_b32 = cls.pad_bytes32_address(recipient_address)
         burn_token_checksum = Web3.to_checksum_address(burn_token_address) if burn_token_address.startswith("0x") and len(burn_token_address) == 42 else "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        valid_domain = int(destination_domain) if destination_domain is not None else 3
 
         encoded_args = encode(
             ["uint256", "uint32", "bytes32", "address"],
-            [amount_raw, destination_domain, recipient_b32, burn_token_checksum],
+            [amount_raw, valid_domain, recipient_b32, burn_token_checksum],
         )
         return "0x" + (selector + encoded_args).hex()
 
@@ -117,7 +118,8 @@ class CalldataExecutor:
             return "0x" + bytes(f"stellar_invoke:deposit({intent.amount},{recipient})", "utf-8").hex()
 
         if quote.calldata_template in ("cctp_deposit_for_burn", "skill_verified"):
-            dst_domain = quote.extra_params.get("destination_domain") or quote.extra_params.get("cctp_domain", 3)
+            raw_domain = quote.extra_params.get("destination_domain") or quote.extra_params.get("cctp_domain")
+            dst_domain = int(raw_domain) if raw_domain is not None else 3
             return cls.encode_cctp_deposit_for_burn(
                 amount_raw=quote.deposit_amount_raw,
                 destination_domain=dst_domain,

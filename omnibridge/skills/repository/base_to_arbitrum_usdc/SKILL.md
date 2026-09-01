@@ -1,13 +1,14 @@
 ---
 name: base_to_arbitrum_usdc
 description: Verified bridge procedure for USDC from base to arbitrum via CIRCLE CCTP
-  (TOKENMESSENGER) (Skill Cache) (Verified Skill)
+  (TOKENMESSENGER) (Skill Cache) (Verified Skill) (Verified Skill)
 source_chain: base
 source_chain_id: 8453
 dest_chain: arbitrum
 dest_chain_id: 42161
 token: USDC
-bridge_protocol: CIRCLE CCTP (TOKENMESSENGER) (Skill Cache) (Verified Skill)
+bridge_protocol: CIRCLE CCTP (TOKENMESSENGER) (Skill Cache) (Verified Skill) (Verified
+  Skill)
 router_address: '0x12ade2554a39A27dd2465376F4302cCc8004ce38'
 source_token_address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
 dest_token_address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831'
@@ -30,7 +31,7 @@ tags:
 # BASE_TO_ARBITRUM_USDC Execution Routine
 
 ## Route Metadata
-- **Protocol:** CIRCLE CCTP (TOKENMESSENGER) (Skill Cache) (Verified Skill)
+- **Protocol:** CIRCLE CCTP (TOKENMESSENGER) (Skill Cache) (Verified Skill) (Verified Skill)
 - **Source Router Contract:** `0x12ade2554a39A27dd2465376F4302cCc8004ce38`
 - **Source Token:** `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
 - **Destination Token:** `0xaf88d065e77c8cC2239327C5EDb3A432268e5831`

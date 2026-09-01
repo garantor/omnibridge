@@ -32,6 +32,20 @@ class ResumeBridgeRequest(BaseModel):
     signed_transaction_hex: Optional[str] = None
 
 
+@server_app.get("/")
+def root():
+    return {
+        "service": "Omnibridge Headless LangGraph Bridging Engine",
+        "docs": "/docs",
+        "health": "/health",
+        "skills": "/api/skills",
+        "endpoints": {
+            "start": "POST /api/bridge/start",
+            "resume": "POST /api/bridge/resume",
+        },
+    }
+
+
 @server_app.get("/health")
 def health():
     return {"status": "HEALTHY", "runtime": "LangGraph State Machine Engine"}
