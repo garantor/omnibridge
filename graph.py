@@ -72,6 +72,21 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
         tok = tok or "NATIVE"
         amt = amt if amt > 0 else 1.0
 
+    from rich.console import Console
+    from rich.panel import Panel
+    _console = Console()
+
+    _console.print(Panel(
+        f"[bold white]Raw Input:[/bold white] \"{raw}\"\n"
+        f"[bold white]Source Chain:[/bold white] {src}\n"
+        f"[bold white]Target Chain:[/bold white] {dst}\n"
+        f"[bold white]Amount & Asset:[/bold white] {amt} {tok}\n"
+        f"[bold white]Recipient / User Wallet:[/bold white] {user_addr}\n"
+        f"[bold white]Slippage Tolerance:[/bold white] {slip}",
+        title="[bold cyan]🧠 [STEP 1: INTENT & PARAMETER EXTRACTION][/bold cyan]",
+        border_style="cyan"
+    ))
+
     traces = state.get("traces", {})
     traces["step_1_intent"] = {
         "title": "Intent & Parameter Extraction",
@@ -101,6 +116,10 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
 
 # --- NODE 2: Skill Check or Web Search Discovery ---
 def discovery_node(state: GraphState) -> Dict[str, Any]:
+    from rich.console import Console
+    from rich.panel import Panel
+    _console = Console()
+
     intent = UserIntent(
         token=state["asset"],
         amount=state["amount"],
@@ -109,15 +128,42 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
         recipient=state["user_address"],
     )
 
+    search_query = f"Bridge {state['asset']} from {state['source_chain']} to {state['target_chain']} official routers & RPCs"
+    
+    # Check Skill Memory
     quote = finder.discover_route(intent)
     fastest_rpc = rpc_mgr.get_fastest_rpc_sync(state["source_chain"])
     is_cached = "Skill" in quote.bridge_name or "Verified" in quote.bridge_name
+
+    # Explicitly invoke LangChain web_search_tool (it prints the RAW search results first)
+    from tools import web_search_tool, fetch_doc_content_tool
+    search_log = web_search_tool.invoke(search_query)
+
+    # Extract documentation link from search results and deep-inspect the docs
+    doc_urls = re.findall(r'https?://[^\s()]+', search_log)
+    target_doc = doc_urls[0] if doc_urls else "https://docs.circle.com/cctp"
+    doc_specs = fetch_doc_content_tool.invoke(target_doc)
+
+    # PRINT 2: Then print the PARSED extraction and intended parameters
+    _console.print(Panel(
+        f"[bold green]Parsed Protocol:[/bold green] {quote.bridge_name} ({'⚡ Skill Memory' if is_cached else '🔍 Web Search'})\n"
+        f"[bold green]Router Contract to Use:[/bold green] [white]`{quote.router_address}`[/white]\n"
+        f"[bold green]Source Token Address:[/bold green] [white]`{quote.source_token_address}`[/white]\n"
+        f"[bold green]Destination Token Address:[/bold green] [white]`{quote.dest_token_address}`[/white]\n"
+        f"[bold green]Active Selected RPC:[/bold green] [cyan]{fastest_rpc}[/cyan]\n"
+        f"[bold green]Chain IDs:[/bold green] {quote.source_chain_id} ({state['source_chain']}) ➔ {quote.dest_chain_id} ({state['target_chain']})",
+        title="[bold green]📋 [STEP 2: PARSED EXTRACTED PARAMETERS INTENDED TO USE][/bold green]",
+        border_style="green"
+    ))
 
     traces = state.get("traces", {})
     traces["step_2_discovery"] = {
         "title": "Route & Contract Discovery",
         "source_type": "SKILL_MEMORY_CACHE" if is_cached else "DYNAMIC_WEB_DOCS_SEARCH",
-        "search_query": f"Bridge {state['asset']} from {state['source_chain']} to {state['target_chain']} official routers & RPCs",
+        "search_query": search_query,
+        "web_search_tool_output": search_log,
+        "deep_doc_url": target_doc,
+        "deep_doc_specs": doc_specs,
         "discovered_route": quote.bridge_name,
         "router_contract": quote.router_address,
         "source_token": quote.source_token_address,
@@ -142,6 +188,10 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
 
 # --- NODE 3: In-Transit Code Builder ---
 def code_builder_node(state: GraphState) -> Dict[str, Any]:
+    from rich.console import Console
+    from rich.panel import Panel
+    _console = Console()
+
     quote_data = state["route"]["quote_obj"]
     quote = RouteQuote(**quote_data)
 
@@ -162,6 +212,16 @@ def code_builder_node(state: GraphState) -> Dict[str, Any]:
         chain_id=quote.source_chain_id,
     )
 
+    # PRINT 3: Then print In-Transit Codegen & Calldata
+    _console.print(Panel(
+        f"[bold cyan]Function Selector:[/bold cyan] {calldata[:10]}\n"
+        f"[bold cyan]Calldata Byte Length:[/bold cyan] {len(calldata)} bytes\n"
+        f"[bold cyan]Raw Calldata Hex Preview:[/bold cyan] {calldata[:66]}...\n\n"
+        f"[bold yellow]Ephemeral In-Transit Python Script Generated in Memory:[/bold yellow]\n{ephemeral_script.strip()}",
+        title="[bold cyan]⚙️ [STEP 3: JIT IN-TRANSIT CODEGEN & CALLDATA SYNTHESIS][/bold cyan]",
+        border_style="cyan"
+    ))
+
     traces = state.get("traces", {})
     traces["step_3_codegen"] = {
         "title": "In-Transit Calldata Synthesis",
@@ -181,7 +241,11 @@ def code_builder_node(state: GraphState) -> Dict[str, Any]:
 
 # --- NODE 4: Dry-Run Simulator ---
 def simulator_node(state: GraphState) -> Dict[str, Any]:
-    rpc_url = state.get("active_rpc") or "https://base-rpc.publicnode.com"
+    from rich.console import Console
+    from rich.panel import Panel
+    _console = Console()
+
+    rpc_url = state.get("active_rpc") or rpc_mgr.get_fastest_rpc_sync(state.get("source_chain", "base"))
     sim = Simulator(rpc_url)
     
     sim_res = sim.simulate_call(
@@ -190,6 +254,19 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
         calldata=state["unsigned_transaction_hex"],
         value_wei=0,
     )
+
+    # PRINT 4: Then print Simulation Result
+    status_color = "green" if sim_res.success else "red"
+    _console.print(Panel(
+        f"[bold {status_color}]Simulation Success:[/bold {status_color}] {sim_res.success}\n"
+        f"[bold white]Target RPC Node:[/bold white] {rpc_url}\n"
+        f"[bold white]Gas Units Used:[/bold white] {sim_res.gas_used} gas\n"
+        f"[bold white]Estimated Gas Cost USD:[/bold white] ${sim_res.estimated_gas_cost_usd:.4f}\n"
+        f"[bold white]Zero Reverts Verification:[/bold white] {'✓ PASSED (Safe to Execute)' if sim_res.success else '❌ REVERT DETECTED'}\n"
+        + (f"[bold red]Revert Reason:[/bold red] {sim_res.revert_reason}" if not sim_res.success else ""),
+        title=f"[bold {status_color}]🧪 [STEP 4: LIVE DRY-RUN SIMULATION (eth_call)][/bold {status_color}]",
+        border_style=status_color
+    ))
 
     traces = state.get("traces", {})
     traces["step_4_simulation"] = {

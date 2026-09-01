@@ -90,43 +90,47 @@ class RouteFinder:
         src = src_chain.name.lower()
         dst = dst_chain.name.lower()
 
-        bridge_name = f"In-Transit Native Bridge ({src.capitalize()} ➔ {dst.capitalize()})"
-        discovered_router = None
-        discovered_src_token = "0x0000000000000000000000000000000000000000"
-        discovered_dst_token = "0x0000000000000000000000000000000000000000"
-        fee_pct = 0.0002
-        gas_units = 210000
-        calldata_template = "generic_bridge_deposit"
+        # Dynamic Contract & Parameter Extraction via Live Search & Documentation
+        discovered_router = ""
+        discovered_src_token = ""
+        discovered_dst_token = ""
 
         try:
-            resp = requests.get("https://bridges.llama.fi/bridges?includeChains=true", timeout=3.0)
-            if resp.status_code == 200:
-                bridges_data = resp.json().get("bridges", [])
-                for b in bridges_data:
-                    chains = [c.lower() for c in b.get("chains", [])]
-                    if src in chains and dst in chains:
-                        bridge_name = f"{b.get('displayName', b.get('name', 'Cross-Chain Router'))}"
-                        break
-        except requests.RequestException:
-            # Network issue querying aggregator; proceed with protocol synthesis
+            from tools import web_search_tool, fetch_doc_content_tool
+            search_text = web_search_tool.invoke(f"Bridge {token_sym} from {src} to {dst} router contract address")
+            
+            # Extract EVM hex contract addresses (0x...) or Stellar Strkey addresses (C...)
+            evm_addresses = re.findall(r'0x[a-fA-F0-9]{40}', search_text)
+            strkey_addresses = re.findall(r'C[A-Z0-9]{55}', search_text)
+
+            if strkey_addresses and "stellar" in src:
+                discovered_router = strkey_addresses[0]
+            elif evm_addresses:
+                discovered_router = evm_addresses[0]
+                if len(evm_addresses) > 1:
+                    discovered_src_token = evm_addresses[1]
+                if len(evm_addresses) > 2:
+                    discovered_dst_token = evm_addresses[2]
+        except Exception:
             pass
 
-        # Dynamic protocol router mapping
-        if "stellar" in src or "stellar" in dst:
-            calldata_template = "stellar_soroban_invoke"
-            discovered_router = "0x0000000000000000000000000000000000000000"
-        elif "solana" in src or "solana" in dst:
-            calldata_template = "solana_bridge_program"
-            discovered_router = "0x0000000000000000000000000000000000000000"
-        else:
-            calldata_template = "generic_bridge_deposit"
-            discovered_router = "0x0000000000000000000000000000000000000000"
+        if not discovered_router:
+            # If search didn't yield an address, query verified skill repository
+            cached_skill = self.skill_manager.find_skill(src, dst, token_sym)
+            if cached_skill:
+                meta = cached_skill.metadata
+                discovered_router = meta.router_address
+                discovered_src_token = meta.source_token_address
+                discovered_dst_token = meta.dest_token_address
+
+        if not discovered_router:
+            raise ValueError(f"Route Discovery Error: No verified router contract address found for {src_chain.name} -> {dst_chain.name}. Please verify bridge availability.")
 
         return {
             "name": bridge_name,
             "router_contract": discovered_router,
-            "source_token": discovered_src_token,
-            "dest_token": discovered_dst_token,
+            "source_token": discovered_src_token or f"NATIVE_{token_sym}",
+            "dest_token": discovered_dst_token or f"NATIVE_{token_sym}",
             "fee_pct": fee_pct,
             "gas_units": gas_units,
             "calldata_template": calldata_template,

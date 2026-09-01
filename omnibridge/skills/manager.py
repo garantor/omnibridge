@@ -71,15 +71,22 @@ class SkillManager:
             return None
 
     def list_skills(self) -> List[Skill]:
-        """Lists all registered skills in the repository."""
+        """Lists all registered skills in the repository and local skills directory."""
         skills = []
-        for root, _, files in os.walk(self.repo_dir):
-            for file in files:
-                if file.lower() == "skill.md":
-                    skill_path = Path(root) / file
-                    parsed = self._parse_skill_file(skill_path)
-                    if parsed:
-                        skills.append(parsed)
+        search_dirs = [self.repo_dir, Path.cwd() / "skills", Path(__file__).resolve().parent / "repository"]
+        seen_names = set()
+
+        for sdir in search_dirs:
+            if not sdir.exists():
+                continue
+            for root, _, files in os.walk(sdir):
+                for file in files:
+                    if file.lower() == "skill.md":
+                        skill_path = Path(root) / file
+                        parsed = self._parse_skill_file(skill_path)
+                        if parsed and parsed.metadata.name not in seen_names:
+                            seen_names.add(parsed.metadata.name)
+                            skills.append(parsed)
         return skills
 
     def find_skill(self, source_chain: str, dest_chain: str, token: str) -> Optional[Skill]:
@@ -90,11 +97,12 @@ class SkillManager:
 
         for skill in self.list_skills():
             m = skill.metadata
-            if (
-                m.source_chain.lower() == s_src
-                and m.dest_chain.lower() == s_dst
-                and m.token.upper() == s_tok
-            ):
+            m_src = m.source_chain.lower().strip()
+            m_dst = m.dest_chain.lower().strip()
+            src_match = (m_src == s_src or m_src in s_src or s_src in m_src)
+            dst_match = (m_dst == s_dst or m_dst in s_dst or s_dst in m_dst)
+            tok_match = (m.token.upper() == s_tok)
+            if src_match and dst_match and tok_match:
                 return skill
         return None
 

@@ -229,11 +229,17 @@ document.addEventListener("DOMContentLoaded", () => {
             <span class="telemetry-tag ${isSkill ? 'tag-purple' : 'tag-green'}">${isSkill ? '⚡ Skill Cache Hit (0ms)' : '🔍 Live Web Docs Discovery'}</span>
           </div>
           <div class="telemetry-grid">
-            <div class="telemetry-item"><div class="telemetry-key">Search Mode</div><div class="telemetry-val" style="font-size: 0.8rem;">${t2.search_query}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">LangChain Search Query</div><div class="telemetry-val" style="font-size: 0.8rem;">"${t2.search_query}"</div></div>
             <div class="telemetry-item"><div class="telemetry-key">Discovered Protocol</div><div class="telemetry-val" style="color: #a5b4fc;">${t2.discovered_route}</div></div>
             <div class="telemetry-item"><div class="telemetry-key">Router Contract</div><div class="telemetry-val">${t2.router_contract}</div></div>
             <div class="telemetry-item"><div class="telemetry-key">Active Public RPC</div><div class="telemetry-val" style="color: #6ee7b7;">${t2.active_rpc}</div></div>
           </div>
+          ${t2.web_search_tool_output ? `
+            <div style="margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">
+              🔍 LangChain web_search_tool Output:
+            </div>
+            <pre class="code-box" style="color: var(--accent-cyan); font-size: 0.75rem; max-height: 90px;">${t2.web_search_tool_output}</pre>
+          ` : ''}
         </div>
       `;
     }
@@ -312,6 +318,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const data = await response.json();
       setStepActive(5);
+
+      // Detailed Browser Console Logging of Search and Extraction
+      console.group("🌉 Omnibridge Step-by-Step Execution Telemetry");
+      console.log("🧠 Step 1 - Parsed Intent:", data.traces?.step_1_intent?.parsed_parameters);
+      console.log("🔍 Step 2 - Web Search Query:", data.traces?.step_2_discovery?.search_query);
+      console.log("🌐 Step 2 - Web Search Tool Output:", data.traces?.step_2_discovery?.web_search_tool_output);
+      console.log("📋 Step 2 - Extracted Parameters to Use:", {
+        protocol: data.route?.bridge,
+        router_contract: data.route?.router_address,
+        active_rpc: data.traces?.step_2_discovery?.active_rpc,
+        source_chain: data.route?.source,
+        dest_chain: data.route?.target,
+      });
+      console.log("⚙️ Step 3 - Synthesized Calldata Hex:", data.unsigned_transaction_hex);
+      console.log("🧪 Step 4 - Simulation & Gas Profile:", data.traces?.step_4_simulation);
+      console.groupEnd();
 
       if (data.status === "AWAITING_USER_APPROVAL") {
         currentThreadId = data.thread_id;
