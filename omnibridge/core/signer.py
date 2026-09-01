@@ -18,7 +18,7 @@ class Signer:
         self.explorer_url = explorer_url
         self.w3 = Web3(Web3.HTTPProvider(rpc_url)) if rpc_url and rpc_url.startswith("http") else None
 
-    def broadcast_raw_transaction(self, signed_tx_hex: str, chain_id: int = 8453) -> BroadcastReceipt:
+    def broadcast_raw_transaction(self, signed_tx_hex: str, chain_id: int = 1) -> BroadcastReceipt:
         """Submits an externally signed raw transaction directly on-chain."""
         clean_hex = signed_tx_hex.strip() if signed_tx_hex else ""
         if not clean_hex.startswith("0x"):
@@ -30,7 +30,7 @@ class Signer:
             return BroadcastReceipt(
                 tx_hash=clean_hex,
                 chain_id=chain_id,
-                explorer_url=f"{self.explorer_url}/tx/{clean_hex}" if self.explorer_url else f"https://basescan.org/tx/{clean_hex}",
+                explorer_url=f"{self.explorer_url}/tx/{clean_hex}" if self.explorer_url else f"https://blockscan.com/tx/{clean_hex}",
                 status="submitted_on_chain",
                 timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             )
@@ -103,4 +103,5 @@ class Signer:
             )
 
         signed_hex = raw_tx_payload.get("signed_hex") or raw_tx_payload.get("tx_hash") or raw_tx_payload.get("data")
-        return self.broadcast_raw_transaction(signed_hex, chain_id=raw_tx_payload.get("chainId", 8453))
+        dyn_chain_id = raw_tx_payload.get("chainId") or (self.w3.eth.chain_id if (self.w3 and self.w3.is_connected()) else 1)
+        return self.broadcast_raw_transaction(signed_hex, chain_id=dyn_chain_id)

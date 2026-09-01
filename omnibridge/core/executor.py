@@ -170,7 +170,7 @@ class CalldataExecutor:
         router_address: str,
         calldata: str,
         value_wei: int = 0,
-        chain_id: int = 8453,
+        chain_id: int = 1,
     ) -> str:
         """Produces a standalone ephemeral Python script demonstrating the exact transaction construction."""
         return f'''# Ephemeral Bridge Execution Script

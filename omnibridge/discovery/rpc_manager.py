@@ -43,28 +43,44 @@ class RPCManager:
             )
             if resp.status_code == 200:
                 chains = resp.json()
+                # Pass 1: Strict exact match (e.g. "base" -> Base 8453, not Moonbase 1287)
+                matched_chain = None
                 for c in chains:
-                    c_name = c.get("name", "").lower()
-                    c_short = c.get("shortName", "").lower()
-                    if key == c_name or key == c_short or (len(key) > 3 and key in c_name):
-                        raw_rpcs = [
-                            url
-                            for url in c.get("rpc", [])
-                            if isinstance(url, str) and url.startswith("http") and "${" not in url
-                        ]
-                        explorer = ""
-                        if c.get("explorers") and len(c["explorers"]) > 0:
-                            explorer = c["explorers"][0].get("url", "")
+                    c_name = c.get("name", "").lower().strip()
+                    c_short = c.get("shortName", "").lower().strip()
+                    c_chain = c.get("chain", "").lower().strip()
+                    if key in (c_name, c_short, c_chain):
+                        matched_chain = c
+                        break
 
-                        discovered = ChainInfo(
-                            chain_id=c.get("chainId", 1),
-                            name=c.get("name", chain_name.capitalize()),
-                            native_symbol=c.get("nativeCurrency", {}).get("symbol", "ETH"),
-                            block_explorer=explorer or f"https://{key}scan.io",
-                            rpc_urls=raw_rpcs[:5] if raw_rpcs else [f"https://{key}-rpc.publicnode.com"],
-                        )
-                        self.register_discovered_chain(discovered)
-                        return discovered
+                # Pass 2: Word boundary prefix match only if no exact match
+                if not matched_chain:
+                    for c in chains:
+                        c_name = c.get("name", "").lower()
+                        if c_name.startswith(f"{key} ") or c_name == key:
+                            matched_chain = c
+                            break
+
+                if matched_chain:
+                    c = matched_chain
+                    raw_rpcs = [
+                        url
+                        for url in c.get("rpc", [])
+                        if isinstance(url, str) and url.startswith("http") and "${" not in url
+                    ]
+                    explorer = ""
+                    if c.get("explorers") and len(c["explorers"]) > 0:
+                        explorer = c["explorers"][0].get("url", "")
+
+                    discovered = ChainInfo(
+                        chain_id=c.get("chainId", 1),
+                        name=c.get("name", chain_name.capitalize()),
+                        native_symbol=c.get("nativeCurrency", {}).get("symbol", "ETH"),
+                        block_explorer=explorer or f"https://{key}scan.io",
+                        rpc_urls=raw_rpcs[:5] if raw_rpcs else [f"https://{key}-rpc.publicnode.com"],
+                    )
+                    self.register_discovered_chain(discovered)
+                    return discovered
         except requests.RequestException as e:
             # Network issue querying registry; proceed to concrete publicnode fallback
             pass

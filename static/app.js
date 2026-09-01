@@ -69,6 +69,29 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentUnsignedHex = null;
   let currentRouterAddress = null;
 
+  // Theme Management (Dual Mode: Dark & Light)
+  const themeToggleBtn = document.getElementById("theme-toggle-btn");
+  const themeIcon = document.getElementById("theme-icon");
+
+  function setTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("omnibridge_theme", theme);
+    if (themeIcon) {
+      themeIcon.textContent = theme === "light" ? "☀️" : "🌙";
+    }
+  }
+
+  const savedTheme = localStorage.getItem("omnibridge_theme") || "dark";
+  setTheme(savedTheme);
+
+  if (themeToggleBtn) {
+    themeToggleBtn.addEventListener("click", () => {
+      const currentTheme = document.documentElement.getAttribute("data-theme") || "dark";
+      const newTheme = currentTheme === "dark" ? "light" : "dark";
+      setTheme(newTheme);
+    });
+  }
+
   // Blocknative Subscription for reactive wallet state
   const state = onboard.state.select("wallets");
   state.subscribe((wallets) => {
