@@ -22,7 +22,8 @@ Every field is re-checked by code that has no idea which model produced it:
 | Router is on the resolved source chain | `synthesis._check_shape` | A destination-side contract |
 | Selector recomputed from the signature | `synthesis.synthesize` | A mis-copied selector |
 | Router holds bytecode implementing that selector | `provenance.verify_proposal` | An address that is not the contract claimed (EIP-1967 proxies resolved) |
-| Two independent allowlisted sources | `provenance.check_sources` | A single page treated as evidence |
+| A protocol-documentation source, plus a second independent one | `provenance.check_sources` | A single page treated as evidence; an address known only to a block explorer |
+| Cited sources the search never fetched | `provenance.check_sources` | Corroboration satisfied by URLs the model typed but never opened |
 | ABI encoding from types and values | `executor.encode_dynamic_calldata` | The model touching bytes at all |
 | A real `eth_call` on an identity-checked node | `simulator` | Everything else |
 | A human approving a decoded amount | `hitl_gate_node` | The rest |

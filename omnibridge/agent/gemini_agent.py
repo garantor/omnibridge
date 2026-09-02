@@ -360,6 +360,7 @@ class GeminiDiscoveryAgent(DiscoveryProvider):
         # Raises on a missing field rather than defaulting. Gemini does not enforce the
         # schema server-side, so this is where an incomplete answer is caught.
         proposal = RouteProposal.from_tool_input(payload)
+        proposal.retrieved = list(retrieved)
         log.ok(f"proposed {proposal.protocol}")
         log.value("router", proposal.router_address)
         log.value("function", proposal.function_signature)

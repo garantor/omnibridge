@@ -188,6 +188,7 @@ Recorded because each was silently wrong rather than loudly broken — the class
 - Persisted skills recorded `dest_chain_id=200` for every route, and a `last_verified` date pinned to a literal string.
 - `rpc-bench` always reported `Unknown chain`, because it read a cache that only `discover_chain_metadata()` populates.
 - `tools.py` held a LangChain tool surface — `python_repl_runner` (a bare `exec`), `eth_call_simulator`, `rpc_broadcaster`, `save_skill_tool` — that nothing ever invoked. Deleted with the module.
+- Source corroboration counted any two allowlisted hostnames, without regard for whether anything had been read — so a model citing two URLs it never opened passed, while one honestly citing a block explorer alongside the docs was refused.
 - The intent parser substituted `Unknown / 1.0 NATIVE` for anything it could not parse and reported `COMPLETED`.
 - A malformed resume payload read as `USER_APPROVED`, carrying unsigned calldata forward as though a human had signed it.
 

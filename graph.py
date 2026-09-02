@@ -409,7 +409,9 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     log.step("checking the proposal (Rule A boundary — the model stops choosing here)")
     with log.timed("shape, provenance and encoding"):
         calldata, quote, evidence = synthesize(
-            proposal, intent, src_info, w3, allowed_domains=agent.domains
+            proposal, intent, src_info, w3,
+            allowed_domains=agent.domains,
+            retrieved=getattr(proposal, "retrieved", None) or None,
         )
 
     prov = evidence.get("provenance") or {}
@@ -420,9 +422,10 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
         if prov.get("implementation_address"):
             log.value("EIP-1967 implementation", prov["implementation_address"])
         log.value("selector present in bytecode", prov.get("selector_present"))
-        log.value("corroborating domains", ", ".join(prov.get("corroborating_domains") or []) or "none")
-        if prov.get("disallowed_domains"):
-            log.warn(f"rejected off-allowlist sources: {', '.join(prov['disallowed_domains'])}")
+        log.value("documentation sources", ", ".join(prov.get("primary_domains") or []) or "none")
+        log.value("explorer sources", ", ".join(prov.get("secondary_domains") or []) or "none")
+        for note in prov.get("notes") or []:
+            log.warn(note)
     log.value("selector recomputed", evidence.get("selector_recomputed"))
     log.ok(f"calldata built, {evidence.get('calldata_bytes')} bytes")
 

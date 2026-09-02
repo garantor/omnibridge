@@ -369,3 +369,88 @@ def test_a_credentials_failure_is_not_reported_as_a_missing_route(monkeypatch):
     assert out["status"] == "CONFIG_ERROR"
     assert out["failure_context"] is None
     assert g.route_after_error({**out}) == "__end__"
+
+
+# ----------------------------------------------------- tiered corroboration
+
+def test_documentation_plus_an_explorer_is_enough():
+    """
+    The case that was failing. A route named by the protocol's own docs and
+    cross-checked on a block explorer was rejected for having looked in one place too
+    many — while a model citing two allowlisted URLs it never opened passed.
+    """
+    from omnibridge.agent.contract import DEFAULT_ALLOWED_DOMAINS
+    from omnibridge.agent.provenance import check_sources
+
+    result = check_sources(
+        ["https://docs.circle.com/cctp", "https://basescan.org/address/0x1682"],
+        DEFAULT_ALLOWED_DOMAINS,
+    )
+    assert result["primary"] == ["docs.circle.com"]
+    assert result["secondary"] == ["basescan.org"]
+    assert len(result["corroborating"]) == 2
+    # Dropped, not fatal.
+    assert result["disallowed"] == []
+
+
+def test_an_explorer_can_never_be_the_only_kind_of_source():
+    """
+    Explorers corroborate; they do not establish authority. Anyone can deploy a
+    byte-identical clone and verify it on one, and it looks exactly as legitimate.
+    """
+    from omnibridge.agent.contract import DEFAULT_ALLOWED_DOMAINS
+    from omnibridge.agent.provenance import check_sources
+
+    for sources in (
+        ["https://basescan.org/address/0x1"],
+        ["https://basescan.org/address/0x1", "https://arbiscan.io/address/0x2"],
+    ):
+        result = check_sources(sources, DEFAULT_ALLOWED_DOMAINS)
+        assert result["primary"] == [], sources
+
+
+def test_an_unrelated_host_is_still_dropped():
+    from omnibridge.agent.contract import DEFAULT_ALLOWED_DOMAINS
+    from omnibridge.agent.provenance import check_sources
+
+    result = check_sources(["https://some-blog.example/bridges"], DEFAULT_ALLOWED_DOMAINS)
+    assert result["disallowed"] == ["some-blog.example"]
+    assert result["corroborating"] == []
+
+
+def test_a_citation_the_search_never_fetched_is_recorded():
+    """
+    check_sources inspects hostnames; it never visits a URL. Without retrieval evidence
+    "two independent sources" means "two plausible hostnames the model typed".
+    """
+    from omnibridge.agent.contract import DEFAULT_ALLOWED_DOMAINS
+    from omnibridge.agent.provenance import check_sources
+
+    result = check_sources(
+        ["https://docs.circle.com/a", "https://developers.circle.com/b"],
+        DEFAULT_ALLOWED_DOMAINS,
+        retrieved=["https://docs.across.to/elsewhere"],
+    )
+    assert len(result["unretrieved_citations"]) == 2
+
+
+def test_a_route_with_no_documentation_source_is_refused_by_verify_proposal():
+    """End to end through the report, not just the sorter."""
+    from omnibridge.agent.contract import DEFAULT_ALLOWED_DOMAINS
+    from omnibridge.agent.provenance import verify_proposal
+
+    class _W3:
+        class eth:
+            @staticmethod
+            def get_code(_):
+                # Bytecode containing the depositForBurn selector, so only sourcing fails.
+                return bytes.fromhex("6fd3504e" + "00" * 64)
+
+    report = verify_proposal(
+        _W3(), ROUTER, SIGNATURE,
+        ["https://basescan.org/address/0x1682"],
+        allowed_domains=DEFAULT_ALLOWED_DOMAINS,
+    )
+    assert not report.ok
+    assert any("documentation allowlist" in f for f in report.failures)
+    assert report.selector_present, "the on-chain check should have passed"

@@ -68,6 +68,7 @@ def synthesize(
     w3: Optional[Web3],
     allowed_domains: Optional[List[str]] = None,
     decimals: int = 6,
+    retrieved: Optional[List[str]] = None,
 ) -> Tuple[str, RouteQuote, Dict[str, Any]]:
     """
     Check a proposal and encode it, or refuse.
@@ -91,6 +92,9 @@ def synthesize(
             proposal.function_signature,
             proposal.sources,
             allowed_domains=allowed_domains,
+            # What the provider's search actually fetched, when it can say. Without it
+            # corroboration is a hostname check on URLs the model typed.
+            retrieved=retrieved,
         )
         if not report.ok:
             raise ProposalRejected(

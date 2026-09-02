@@ -99,6 +99,10 @@ class RouteProposal:
     dest_chain_ref: Dict[str, Any]
     sources: List[str]
     rationale: str
+    #: URLs the provider's search really fetched, when the provider can report them.
+    #: Distinct from `sources`, which is what the model says it used — the two differ,
+    #: and only the first is evidence that anything was read.
+    retrieved: List[str] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:

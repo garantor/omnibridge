@@ -27,6 +27,32 @@ EIP1967_IMPLEMENTATION_SLOT = (
 # Minimum independent sources that must name a router address before it is eligible.
 MIN_CORROBORATING_SOURCES = 2
 
+# Sources come in two tiers, because they answer different questions.
+#
+# A protocol's own documentation is the only thing that establishes which contract is
+# *official* — that is an editorial fact about the project, and only the project can
+# state it. A block explorer establishes something narrower but still useful: that the
+# address exists, holds verified source, and often carries a curated name tag.
+#
+# Explorers are therefore corroboration, never authority. Anyone can deploy a
+# byte-identical clone and verify it on a block explorer; it will look exactly as
+# legitimate as the real thing. So an explorer can be the second source, never the only
+# one — a route named by two explorers and no documentation has not been established.
+SECONDARY_DOMAINS = [
+    "etherscan.io",
+    "basescan.org",
+    "arbiscan.io",
+    "optimistic.etherscan.io",
+    "polygonscan.com",
+    "snowtrace.io",
+    "bscscan.com",
+    "blockscout.com",
+    "solscan.io",
+    "explorer.solana.com",
+    "stellar.expert",
+    "suiscan.xyz",
+]
+
 
 @dataclass
 class ProvenanceReport:
@@ -39,8 +65,16 @@ class ProvenanceReport:
     selector: Optional[str] = None
     selector_present: bool = False
     corroborating_domains: List[str] = field(default_factory=list)
+    primary_domains: List[str] = field(default_factory=list)
+    secondary_domains: List[str] = field(default_factory=list)
     disallowed_domains: List[str] = field(default_factory=list)
+    # Sources the provider's search actually fetched, as opposed to ones the model
+    # merely named. Empty means the provider could not tell us, not that nothing was read.
+    retrieved_domains: List[str] = field(default_factory=list)
+    unretrieved_citations: List[str] = field(default_factory=list)
     failures: List[str] = field(default_factory=list)
+    # Observations that inform the human but do not block the route.
+    notes: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -55,8 +89,13 @@ class ProvenanceReport:
             "selector": self.selector,
             "selector_present": self.selector_present,
             "corroborating_domains": self.corroborating_domains,
+            "primary_domains": self.primary_domains,
+            "secondary_domains": self.secondary_domains,
             "disallowed_domains": self.disallowed_domains,
+            "retrieved_domains": self.retrieved_domains,
+            "unretrieved_citations": self.unretrieved_citations,
             "failures": self.failures,
+            "notes": self.notes,
             "passed": self.ok,
         }
 
@@ -97,28 +136,63 @@ def registrable_domain(url: str) -> str:
 
 
 def check_sources(
-    sources: List[str], allowed_domains: Optional[List[str]] = None
+    sources: List[str],
+    allowed_domains: Optional[List[str]] = None,
+    secondary_domains: Optional[List[str]] = None,
+    retrieved: Optional[List[str]] = None,
 ) -> Dict[str, List[str]]:
     """
-    Corroboration and allowlisting.
+    Sort cited sources into tiers, and mark the ones nothing actually read.
 
-    An address named by a single page is a claim; one named by two independent hosts is
-    evidence. The allowlist is operator security configuration — it constrains where
-    information may come from and encodes no per-bridge behaviour.
+    Three groups come out. `primary` is protocol documentation — the only tier that can
+    establish which contract is official. `secondary` is block explorers, which
+    corroborate that an address exists and holds verified code but cannot speak to
+    whether it is the right one. `disallowed` is everything else.
+
+    `retrieved` is the list of URLs the provider's search really fetched, when the
+    provider can tell us. It matters because this function only ever inspects a URL's
+    hostname — it does not visit it — so without retrieval evidence "two independent
+    sources" means "two plausible hostnames the model typed". That check rewards citing
+    the right kind of host rather than having read anything, and penalises a model that
+    honestly cites where it looked.
     """
-    domains, disallowed = [], []
+    secondary_domains = SECONDARY_DOMAINS if secondary_domains is None else secondary_domains
+    retrieved_hosts = {registrable_domain(u) for u in (retrieved or []) if u}
+
+    def matches(domain: str, patterns: List[str]) -> bool:
+        return any(domain == p or domain.endswith("." + p) for p in patterns)
+
+    primary: List[str] = []
+    secondary: List[str] = []
+    disallowed: List[str] = []
+    unretrieved: List[str] = []
+
     for url in sources or []:
         domain = registrable_domain(url)
         if not domain:
             continue
-        if allowed_domains and not any(
-            domain == a or domain.endswith("." + a) for a in allowed_domains
-        ):
+        if retrieved_hosts and domain not in retrieved_hosts:
+            unretrieved.append(url)
+        if allowed_domains and matches(domain, allowed_domains):
+            if domain not in primary:
+                primary.append(domain)
+        elif matches(domain, secondary_domains):
+            if domain not in secondary:
+                secondary.append(domain)
+        elif not allowed_domains:
+            if domain not in primary:
+                primary.append(domain)
+        else:
             disallowed.append(domain)
-            continue
-        if domain not in domains:
-            domains.append(domain)
-    return {"corroborating": domains, "disallowed": disallowed}
+
+    return {
+        "primary": primary,
+        "secondary": secondary,
+        "corroborating": primary + [d for d in secondary if d not in primary],
+        "disallowed": disallowed,
+        "retrieved": sorted(h for h in retrieved_hosts if h),
+        "unretrieved_citations": unretrieved,
+    }
 
 
 def verify_proposal(
@@ -128,6 +202,8 @@ def verify_proposal(
     sources: List[str],
     allowed_domains: Optional[List[str]] = None,
     min_sources: int = MIN_CORROBORATING_SOURCES,
+    retrieved: Optional[List[str]] = None,
+    secondary_domains: Optional[List[str]] = None,
 ) -> ProvenanceReport:
     """
     Run every check that needs no prior knowledge of the protocol.
@@ -188,19 +264,45 @@ def verify_proposal(
             f"deployed bytecode of {where}. The contract does not implement what was claimed."
         )
 
-    # 3. Corroboration and allowlisting.
-    checked = check_sources(sources, allowed_domains)
+    # 3. Corroboration, in tiers.
+    checked = check_sources(sources, allowed_domains, secondary_domains, retrieved)
+    report.primary_domains = checked["primary"]
+    report.secondary_domains = checked["secondary"]
     report.corroborating_domains = checked["corroborating"]
     report.disallowed_domains = checked["disallowed"]
+    report.retrieved_domains = checked["retrieved"]
+    report.unretrieved_citations = checked["unretrieved_citations"]
 
+    # An off-allowlist source is dropped, not fatal. It used to fail the whole proposal,
+    # so a route documented correctly *and* cross-checked on a block explorer was
+    # rejected for having looked in one place too many — while a model citing nothing
+    # but two allowlisted URLs it never opened passed. The remaining checks decide.
     if checked["disallowed"]:
-        report.failures.append(
-            "Sources outside the allowlist: " + ", ".join(sorted(set(checked["disallowed"])))
+        report.notes.append(
+            "Ignored sources outside the allowlist: "
+            + ", ".join(sorted(set(checked["disallowed"])))
         )
-    if len(checked["corroborating"]) < min_sources:
+
+    if not checked["primary"]:
+        report.failures.append(
+            "No source from the documentation allowlist. Block explorers show that an "
+            "address exists and holds verified code; only a protocol's own documentation "
+            "says which address is the official one, and anyone can deploy and verify a "
+            "byte-identical clone."
+        )
+    elif len(checked["corroborating"]) < min_sources:
         report.failures.append(
             f"Router named by {len(checked['corroborating'])} independent source(s); "
             f"{min_sources} required. A single page is a claim, not evidence."
+        )
+
+    if checked["unretrieved_citations"]:
+        # Not fatal on its own — a provider may cite a page it read in an earlier turn —
+        # but it is the failure that would otherwise satisfy corroboration invisibly, so
+        # it is recorded and shown to the human rather than swallowed.
+        report.notes.append(
+            f"{len(checked['unretrieved_citations'])} cited source(s) were never fetched "
+            "by the provider's search: " + ", ".join(checked["unretrieved_citations"][:4])
         )
 
     return report
