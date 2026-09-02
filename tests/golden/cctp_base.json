@@ -1,0 +1,114 @@
+[
+  {
+    "tx_hash": "0xee1164ae363f1b904326c4f71dbce64ac058914da750e463882f2763e5deec88",
+    "block": 50729431,
+    "source_chain": "Base",
+    "source_chain_id": 8453,
+    "dest_domain": 0,
+    "dest_chain": "Ethereum",
+    "router_address": "0x1682Ae6375C4E4A97e4B583BC394c861A46D8962",
+    "function_signature": "depositForBurn(uint256,uint32,bytes32,address)",
+    "selector": "0x6fd3504e",
+    "param_types": [
+      "uint256",
+      "uint32",
+      "bytes32",
+      "address"
+    ],
+    "param_values": [
+      "40089570798",
+      0,
+      "0x0000000000000000000000001cb432f80416f07db4420b8c20447924a0658894",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    ],
+    "amount_raw": "40089570798",
+    "amount_human": 40089.570798,
+    "token": "USDC",
+    "decimals": 6,
+    "expected_calldata": "0x6fd3504e0000000000000000000000000000000000000000000000000000000955864dee00000000000000000000000000000000000000000000000000000000000000000000000000000000000000001cb432f80416f07db4420b8c20447924a0658894000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+  },
+  {
+    "tx_hash": "0x61ea43207f43d03fe09ed73b411a96a4dc41c19592d39da92e4354957770ff3d",
+    "block": 50727988,
+    "source_chain": "Base",
+    "source_chain_id": 8453,
+    "dest_domain": 3,
+    "dest_chain": "Arbitrum",
+    "router_address": "0x1682Ae6375C4E4A97e4B583BC394c861A46D8962",
+    "function_signature": "depositForBurn(uint256,uint32,bytes32,address)",
+    "selector": "0x6fd3504e",
+    "param_types": [
+      "uint256",
+      "uint32",
+      "bytes32",
+      "address"
+    ],
+    "param_values": [
+      "12529879833",
+      3,
+      "0x0000000000000000000000000b2eacbbd70cf8d17acdb56191fb894c8e1e63aa",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    ],
+    "amount_raw": "12529879833",
+    "amount_human": 12529.879833,
+    "token": "USDC",
+    "decimals": 6,
+    "expected_calldata": "0x6fd3504e00000000000000000000000000000000000000000000000000000002ead6cb1900000000000000000000000000000000000000000000000000000000000000030000000000000000000000000b2eacbbd70cf8d17acdb56191fb894c8e1e63aa000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+  },
+  {
+    "tx_hash": "0x4b17ceaf949c251bc1d8180e55cea37f83f70765881d3edb88e52a7f9e93f0fc",
+    "block": 50726645,
+    "source_chain": "Base",
+    "source_chain_id": 8453,
+    "dest_domain": 5,
+    "dest_chain": "Solana",
+    "router_address": "0x1682Ae6375C4E4A97e4B583BC394c861A46D8962",
+    "function_signature": "depositForBurn(uint256,uint32,bytes32,address)",
+    "selector": "0x6fd3504e",
+    "param_types": [
+      "uint256",
+      "uint32",
+      "bytes32",
+      "address"
+    ],
+    "param_values": [
+      "1602563515",
+      5,
+      "0x9cef65fe64fc960933ddac6ea841b4d10e8f0d199ce6ed574b1607a18fb2ef12",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    ],
+    "amount_raw": "1602563515",
+    "amount_human": 1602.563515,
+    "token": "USDC",
+    "decimals": 6,
+    "expected_calldata": "0x6fd3504e000000000000000000000000000000000000000000000000000000005f852dbb00000000000000000000000000000000000000000000000000000000000000059cef65fe64fc960933ddac6ea841b4d10e8f0d199ce6ed574b1607a18fb2ef12000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+  },
+  {
+    "tx_hash": "0xeaa8aeb84a60e055a218bd3f3e996ee28c116d13be40124636b27da93c3e43d5",
+    "block": 50731313,
+    "source_chain": "Base",
+    "source_chain_id": 8453,
+    "dest_domain": 8,
+    "dest_chain": "Sui",
+    "router_address": "0x1682Ae6375C4E4A97e4B583BC394c861A46D8962",
+    "function_signature": "depositForBurn(uint256,uint32,bytes32,address)",
+    "selector": "0x6fd3504e",
+    "param_types": [
+      "uint256",
+      "uint32",
+      "bytes32",
+      "address"
+    ],
+    "param_values": [
+      "101000000",
+      8,
+      "0x0a7d41c5381d9a31bc4033b532279ef69c11106beaf8891bf954f315e75b362c",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    ],
+    "amount_raw": "101000000",
+    "amount_human": 101.0,
+    "token": "USDC",
+    "decimals": 6,
+    "expected_calldata": "0x6fd3504e000000000000000000000000000000000000000000000000000000000605234000000000000000000000000000000000000000000000000000000000000000080a7d41c5381d9a31bc4033b532279ef69c11106beaf8891bf954f315e75b362c000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+  }
+]

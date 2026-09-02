@@ -244,3 +244,37 @@ def test_cctp_requires_an_explicit_destination_domain():
             burn_token_address=SOME_ROUTER,
         )
     assert "destinationDomain is required" in str(excinfo.value)
+
+
+def test_non_evm_recipient_is_never_hashed_into_a_new_address():
+    """
+    pad_bytes32_address used to `return Web3.keccak(text=address)` for anything longer
+    than 20 bytes — every non-EVM recipient, which is the case it exists to serve. The
+    result was a well-formed bytes32 that the contract accepts, that simulates with no
+    revert, and that nobody holds the key for: funds burned on the source chain and
+    minted to an unrecoverable address.
+    """
+    from omnibridge.core.executor import CalldataExecutor
+    from web3 import Web3
+
+    solana_key = "0x" + "ab" * 32
+    out = CalldataExecutor.pad_bytes32_address(solana_key)
+
+    assert out == bytes.fromhex("ab" * 32), "32-byte destination key must pass through intact"
+    assert out != Web3.keccak(text=solana_key), "recipient must never be hashed"
+
+
+def test_evm_recipient_is_left_padded():
+    from omnibridge.core.executor import CalldataExecutor
+
+    out = CalldataExecutor.pad_bytes32_address(VALID_SENDER)
+    assert out[:12] == b"\x00" * 12
+    assert "0x" + out[12:].hex() == VALID_SENDER.lower()
+
+
+def test_recipient_of_an_impossible_width_is_refused():
+    from omnibridge.core.executor import CalldataExecutor
+
+    with pytest.raises(ValueError) as excinfo:
+        CalldataExecutor.pad_bytes32_address("0x" + "ab" * 27)
+    assert "Refusing to hash or truncate" in str(excinfo.value)

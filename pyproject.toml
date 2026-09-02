@@ -41,3 +41,8 @@ include = ["omnibridge*"]
 
 [tool.setuptools]
 py-modules = ["graph", "server", "tools"]
+
+[tool.pytest.ini_options]
+markers = [
+    "network: touches a live RPC or the public chain registry",
+]

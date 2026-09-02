@@ -478,6 +478,44 @@ rather than a surprise.
 **Done when:** the golden set passes against the *current* static implementation. That is the
 baseline Phase 3 must match.
 
+### Found while implementing Phase 2
+
+Fixtures were captured from chain data, never written by hand: router bytecode confirmed via
+`eth_getCode`, selectors computed from their signatures and located in the deployed code,
+calldata lifted verbatim from confirmed transactions found by reading router logs. Domain
+numbers cross-checked against Circle's own table — which incidentally confirms **domain 27 is
+Stellar**, so the Base to Stellar route traced earlier is a real one.
+
+Three findings, one of them severe.
+
+- **`pad_bytes32_address` hashed every non-EVM recipient.** It ended in
+  `return Web3.keccak(text=address)` for any input longer than 20 bytes — that is, for every
+  Solana, Sui, Aptos or Stellar recipient, the precise case the function exists to serve. The
+  result is a well-formed bytes32 the contract accepts, that simulates with no revert, and
+  that nobody holds a key for: burned on the source chain, minted to an unrecoverable address.
+  Nothing in Phase 1 would have caught this; it took a real transaction with a real 32-byte
+  recipient to expose it, which is the entire argument for the golden set.
+- **The selector check needs to follow proxies.** Phase 3.5 proposes locating the claimed
+  4-byte selector in a router's deployed bytecode. The Across SpokePool is an EIP-1967 proxy
+  holding ~680 bytes, and `depositV3` is absent from it — the implementation has it. As
+  specified, that check returns a false negative on most real routers. **Phase 3.5 must read
+  the EIP-1967 implementation slot and check that bytecode before concluding a contract does
+  not implement what was claimed.**
+- **Real calldata carries trailing bytes.** The Across transaction ends in nine bytes of
+  integrator attribution tag appended after the ABI encoding. Not part of the ABI, not
+  derivable from the parameters. Fixtures record it separately so a correct encoder is not
+  scored as wrong.
+
+`coerce_param_values` was added to turn textual ABI arguments into encoder inputs — needed
+here to drive fixtures, and needed again in Phase 3, whose `propose_route` schema carries
+`param_values: list[str]`.
+
+**Not delivered.** 2.3's cost and latency baseline measures agent runs, and there is no agent
+yet; it belongs with the first real model call in Phase 3. The agent-level test in 2.2 exists
+as an `xfail(strict=True)` tripwire that fires the moment Phase 3 can satisfy it. No Soroban
+fixture: it is not EVM, so there is no comparable on-chain calldata to capture, and Phase 1
+already halts those routes as `UNSUPPORTED`.
+
 ---
 
 ## Phase 3 — Wire the reasoning core
