@@ -40,6 +40,30 @@ def find_env_file(start: Optional[Path] = None) -> Optional[Path]:
     return None
 
 
+def _clean_value(raw: str) -> str:
+    """
+    Strip quotes and a trailing inline comment.
+
+    Inline comments are the reason this exists. `OMNIBRIDGE_MODEL=gemini-2.5-pro   #
+    optional` is how people write config files, and keeping the `# optional` made it
+    part of the model name — a request for a model that does not exist, answered with a
+    bare 404 that says nothing about where the junk came from.
+
+    A `#` only opens a comment when it follows whitespace, so `KEY=abc#def` keeps its
+    value; inside quotes nothing is stripped, which is how a value containing a `#` is
+    written deliberately.
+    """
+    value = raw.strip()
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+
+    for i, char in enumerate(value):
+        if char == "#" and (i == 0 or value[i - 1] in " \t"):
+            return value[:i].strip()
+    return value
+
+
 def parse_env_file(path: Path) -> Tuple[Dict[str, str], List[str]]:
     """
     Parse a .env into (values, complaints).
@@ -78,10 +102,7 @@ def parse_env_file(path: Path) -> Tuple[Dict[str, str], List[str]]:
             complaints.append(f"{path}:{lineno}: empty variable name")
             continue
 
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        values[name] = value
+        values[name] = _clean_value(value)
 
     return values, complaints
 

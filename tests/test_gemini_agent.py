@@ -213,3 +213,32 @@ def test_retrieved_urls_are_recorded_alongside_the_cited_ones():
     trace = {}
     agent.discover(INTENT, BASE, "Arbitrum", RequestBudget(), trace=trace)
     assert trace["retrieved_urls"] == ["https://docs.circle.com/a"]
+
+
+def test_a_citation_grounding_never_fetched_is_flagged(monkeypatch, capsys):
+    """
+    Gemini's search has no allowlist, so `check_sources` only validates the hostname of
+    a cited URL — it never fetches it. A model can therefore satisfy corroboration with
+    two plausible URLs it never read. The log says when that happened, because nothing
+    downstream can tell the difference.
+    """
+    monkeypatch.setenv("OMNIBRIDGE_LOG", "normal")
+    research = _response([_part(text="found it")], urls=["https://docs.circle.com/a"])
+    agent = _agent([research, _response([_part(call=_call("propose_route", VALID_ARGS))])])
+
+    agent.discover(INTENT, BASE, "Arbitrum", RequestBudget())
+
+    out = capsys.readouterr().out
+    assert "never fetched by grounding" in out
+    assert "https://developers.circle.com/b" in out
+
+
+def test_no_grounding_at_all_is_called_out(monkeypatch, capsys):
+    """Nothing retrieved means the findings came from the model's weights."""
+    monkeypatch.setenv("OMNIBRIDGE_LOG", "normal")
+    research = _response([_part(text="I recall the router is...")], urls=[])
+    agent = _agent([research, _response([_part(call=_call("propose_route", VALID_ARGS))])])
+
+    agent.discover(INTENT, BASE, "Arbitrum", RequestBudget())
+
+    assert "from model memory, not documentation" in capsys.readouterr().out

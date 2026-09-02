@@ -46,6 +46,7 @@ up as though it had worked. `OMNIBRIDGE_NO_DOTENV=1` skips the file.
 | `OMNIBRIDGE_WORKSPACE_ID` | Required **only** for identity-linked API keys, which are not scoped to one workspace and so cannot infer which one a request acts in. Without it the API refuses the call: *"anthropic-workspace-id is required…"*. A plain key needs nothing here. `ANTHROPIC_WORKSPACE_ID` is also read |
 | `OMNIBRIDGE_PROVIDER` | Which model provider answers discovery. Required only when more than one is configured — see [docs/PROVIDERS.md](docs/PROVIDERS.md) |
 | `OMNIBRIDGE_MODEL` | Override the provider's default model |
+| `OMNIBRIDGE_LOG` | `quiet` / `normal` (default) / `debug`. `normal` prints a timed, step-by-step trail of what each stage did; `debug` adds prompts, model findings and payloads |
 | `OMNIBRIDGE_DISABLE_AGENT=1` | Forces the cache-only path |
 | `OMNIBRIDGE_MAX_RETRIES` | Discovery retry ceiling (default 3) |
 

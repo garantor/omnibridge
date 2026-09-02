@@ -265,6 +265,13 @@ _CONFIG_ERROR_MARKERS = (
     "permission_error",
     "credit balance",
     "rate_limit_error",
+    # A 404 from a model endpoint means the model name is wrong, not that no bridge
+    # exists. It reached the page reserved for routing answers once already.
+    "404",
+    "not found",
+    "not_found",
+    "is not supported",
+    "unsupported model",
 )
 
 
@@ -314,8 +321,19 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     from rich.panel import Panel
     _console = Console()
 
-    src_info = rpc_mgr.discover_chain_metadata(intent.source_chain, network=intent.network)
-    fastest_rpc = rpc_mgr.get_fastest_rpc_sync(intent.source_chain)
+    from omnibridge.steplog import StepLogger
+
+    log = StepLogger("discovery")
+    log.step(f"provider [bold]{agent.name}[/bold] selected")
+    log.value("allowed doc domains", f"{len(agent.domains)}")
+
+    with log.timed(f"resolve chain '{intent.source_chain}'"):
+        src_info = rpc_mgr.discover_chain_metadata(intent.source_chain, network=intent.network)
+    log.value("resolved to", f"{src_info.name} (chain id {src_info.chain_id})")
+
+    with log.timed(f"race {len(src_info.rpc_urls)} RPC endpoint(s)"):
+        fastest_rpc = rpc_mgr.get_fastest_rpc_sync(intent.source_chain)
+    log.value("fastest RPC", fastest_rpc)
 
     budget = RequestBudget(**(state.get("budget") or {}).get("limits", {}))
     agent_trace: Dict[str, Any] = {}
@@ -377,12 +395,36 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
         candidate = Web3(Web3.HTTPProvider(fastest_rpc, request_kwargs={"timeout": 15}))
         if candidate.is_connected() and int(candidate.eth.chain_id) == src_info.chain_id:
             w3 = candidate
-    except Exception:
+            log.ok(f"RPC identity confirmed as chain {src_info.chain_id}")
+        else:
+            log.warn("RPC did not confirm the expected chain id")
+    except Exception as exc:
         w3 = None
+        log.warn(f"no usable RPC for provenance checks: {exc}")
+    if w3 is None:
+        # Said plainly: without a node the bytecode check cannot run, and the proposal
+        # is accepted on the model's word until the simulator gets a look at it.
+        log.warn("skipping on-chain provenance — router bytecode will NOT be checked here")
 
-    calldata, quote, evidence = synthesize(
-        proposal, intent, src_info, w3, allowed_domains=agent.domains
-    )
+    log.step("checking the proposal (Rule A boundary — the model stops choosing here)")
+    with log.timed("shape, provenance and encoding"):
+        calldata, quote, evidence = synthesize(
+            proposal, intent, src_info, w3, allowed_domains=agent.domains
+        )
+
+    prov = evidence.get("provenance") or {}
+    if prov.get("skipped"):
+        log.warn(f"provenance skipped: {prov['skipped']}")
+    else:
+        log.value("router holds bytecode", f"{prov.get('is_contract')} ({prov.get('bytecode_size')} bytes)")
+        if prov.get("implementation_address"):
+            log.value("EIP-1967 implementation", prov["implementation_address"])
+        log.value("selector present in bytecode", prov.get("selector_present"))
+        log.value("corroborating domains", ", ".join(prov.get("corroborating_domains") or []) or "none")
+        if prov.get("disallowed_domains"):
+            log.warn(f"rejected off-allowlist sources: {', '.join(prov['disallowed_domains'])}")
+    log.value("selector recomputed", evidence.get("selector_recomputed"))
+    log.ok(f"calldata built, {evidence.get('calldata_bytes')} bytes")
 
     _console.print(Panel(
         f"[bold green]Protocol:[/bold green] {proposal.protocol}  [dim](agent, {budget.model_calls} model call(s))[/dim]\n"
@@ -520,21 +562,32 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
     from rich.panel import Panel
     _console = Console()
 
+    from omnibridge.steplog import StepLogger
+
+    log = StepLogger("simulate")
     src_name = state["source_chain"]
     src_info = rpc_mgr.discover_chain_metadata(src_name)
     rpc_url = state.get("active_rpc") or rpc_mgr.get_fastest_rpc_sync(src_name)
+    log.step(f"eth_call to {state['route']['router_address']} on chain {src_info.chain_id}")
+    log.value("from", state["user_address"])
+    log.value("calldata", state["unsigned_transaction_hex"], limit=90)
 
     # Every endpoint, preferred order, plus the chain these are supposed to be so an
     # impostor node cannot answer the only question that gates this graph.
     rpc_candidates = [rpc_url] + [u for u in src_info.rpc_urls if u != rpc_url]
     sim = Simulator(rpc_candidates, expected_chain_id=src_info.chain_id)
 
-    sim_res = sim.simulate_call(
-        from_address=state["user_address"],
-        to_address=state["route"]["router_address"],
-        calldata=state["unsigned_transaction_hex"],
-        value_wei=0,
-    )
+    with log.timed("simulate"):
+        sim_res = sim.simulate_call(
+            from_address=state["user_address"],
+            to_address=state["route"]["router_address"],
+            calldata=state["unsigned_transaction_hex"],
+            value_wei=0,
+        )
+    if sim_res.success:
+        log.ok(f"VERIFIED on chain {sim_res.simulated_on_chain_id}, {sim_res.gas_used} gas")
+    else:
+        log.fail(f"{sim_res.status.value}: {sim_res.revert_reason}")
 
     # PRINT 4: Then print Simulation Result
     status_color = "green" if sim_res.success else "red"

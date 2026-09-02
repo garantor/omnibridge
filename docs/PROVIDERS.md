@@ -82,6 +82,11 @@ two terminal functions). Two model calls per attempt, both charged to the budget
   `RouteProposal.from_tool_input`, a malformed one by `synthesis._check_shape` — safe,
   but caught later and less often than server-side enforcement.
 
+Run with `OMNIBRIDGE_LOG=normal` (the default) to watch both phases: which URLs
+grounding actually fetched, the token spend per call, the function it chose, and a
+warning for **any source the model cited that grounding never retrieved** — the failure
+that would otherwise satisfy corroboration invisibly.
+
 Everything downstream is unchanged: the selector is still recomputed, the router's
 bytecode still has to contain it, two independent sources are still required, and a
 real `eth_call` still has to pass before a human sees anything.
