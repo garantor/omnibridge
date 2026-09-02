@@ -1,13 +1,24 @@
 """
-End-to-End Integration Test for LangGraph Web3 Bridging State Machine.
-Validates:
-1. State pipeline execution up to Node 5 (HITL Interrupt Gate).
-2. Verification of the AWAITING_USER_APPROVAL payload.
-3. Resuming the graph with a signed transaction payload.
-4. Final broadcast confirmation and persistent SKILL.md creation.
+End-to-end integration test for the LangGraph bridging state machine.
+
+Validates the full pipeline: execution to the HITL interrupt, the
+AWAITING_USER_APPROVAL payload, resumption with a signed transaction, broadcast,
+and SKILL.md persistence.
+
+It cannot pass without a discovered route. Base -> Solana reaches the approval
+gate only if the reasoning core resolves a router, which needs ANTHROPIC_API_KEY
+and an empty-cache cold path — so this is a Phase 3 tripwire like the one in
+tests/test_golden_routes.py, and it is marked strict so it fires the moment the
+agent can genuinely get there.
+
+Before Phase 4 this failed for a different reason: discovery scraped a hex
+string out of a search result and the run died further downstream.
 """
 
+import os
 import uuid
+
+import pytest
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
@@ -17,6 +28,15 @@ from graph import graph, LOCAL_SKILLS_DIR
 console = Console()
 
 
+@pytest.mark.xfail(
+    condition=not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
+    strict=True,
+    reason=(
+        "Needs the reasoning core to resolve a Base -> Solana router. Without "
+        "credentials the system is cache-only and the run ends at NO_ROUTE_FOUND. "
+        "Set ANTHROPIC_API_KEY to run it for real."
+    ),
+)
 def test_langgraph_bridge_flow():
     console.print("\n[bold magenta]====================================================================[/bold magenta]")
     console.print("[bold cyan]🧪 LANGGRAPH BRIDGING STATE MACHINE - INTEGRATION TEST[/bold cyan]")

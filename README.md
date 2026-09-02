@@ -156,7 +156,7 @@ Ordered by how much they matter.
 
 5. **Cold-path cost is unmeasured.** An Opus 5 discovery run with search and fetches costs materially more than a cache hit. Skills amortise it, but the cold number is not yet known.
 
-6. **`rpc-bench` cannot succeed.** [`cli.py:67`](omnibridge/cli.py#L67) calls `get_chain_info()`, which only reads the in-memory cache that `discover_chain_metadata()` is what populates. It always reports `Unknown chain`.
+6. **The LangChain tool surface is dead code.** `python_repl_runner`, `eth_call_simulator`, `rpc_broadcaster` and `save_skill_tool` in [`tools.py`](tools.py) are defined and never invoked — the graph calls the underlying classes directly, and the agent uses Anthropic's server-side tools. Only `LOCAL_SKILLS_DIR` is imported from that module. Either wire them or delete them.
 
 ### Closed since the first revision of this file
 
@@ -171,6 +171,7 @@ Recorded because each was silently wrong rather than loudly broken — the class
 - `fetch_doc_content_tool` invented ABI signatures, selectors and a Strkey contract address whenever a page fetch failed — which, against JS-rendered docs, was the normal path.
 - The skill cache matched chain names by substring in both directions, so a mainnet skill answered a testnet request.
 - Persisted skills recorded `dest_chain_id=200` for every route, and a `last_verified` date pinned to a literal string.
+- `rpc-bench` always reported `Unknown chain`, because it read a cache that only `discover_chain_metadata()` populates.
 - The intent parser substituted `Unknown / 1.0 NATIVE` for anything it could not parse and reported `COMPLETED`.
 - A malformed resume payload read as `USER_APPROVED`, carrying unsigned calldata forward as though a human had signed it.
 
