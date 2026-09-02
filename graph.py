@@ -283,15 +283,32 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     turns into another attempt.
     """
     from omnibridge.agent.budget import RequestBudget
-    from omnibridge.agent.discovery_agent import DiscoveryAgent, NoRouteFound, agent_disabled
+    from omnibridge.agent.contract import NoRouteFound, ProviderUnavailable, agent_disabled
+    from omnibridge.agent.provider import available_providers, get_provider
     from omnibridge.agent.synthesis import synthesize
 
     if agent_disabled():
         return None
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        return None
     if skill_mgr.find_skill(intent.source_chain, intent.dest_chain, intent.token):
         return None
+
+    # No provider configured is not an error — it is the cache-only mode, and the
+    # cached path below reports its own honest "no route". A provider that is selected
+    # but broken *is* an error, and says so.
+    if not any(cls.configured() for cls in available_providers().values()):
+        return None
+    try:
+        agent = get_provider()
+    except ProviderUnavailable as exc:
+        traces = state.get("traces", {})
+        traces["step_2_discovery"] = {
+            "title": "Route & Contract Discovery (agent)",
+            "source_type": "AGENT_CONFIG_ERROR",
+            "outcome": "CONFIG_ERROR",
+            "reason": str(exc),
+            "status": "FAILED",
+        }
+        return {"status": "CONFIG_ERROR", "error": str(exc), "traces": traces}
 
     from rich.console import Console
     from rich.panel import Panel
@@ -301,7 +318,6 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     fastest_rpc = rpc_mgr.get_fastest_rpc_sync(intent.source_chain)
 
     budget = RequestBudget(**(state.get("budget") or {}).get("limits", {}))
-    agent = DiscoveryAgent()
     agent_trace: Dict[str, Any] = {}
 
     try:
@@ -338,7 +354,7 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
         # the page says "fix your credentials" rather than "no bridge exists", which is
         # what a bare exception message looked like from the frontend.
         detail = str(exc)
-        if _is_configuration_error(detail):
+        if isinstance(exc, ProviderUnavailable) or _is_configuration_error(detail):
             traces = state.get("traces", {})
             traces["step_2_discovery"] = {
                 "title": "Route & Contract Discovery (agent)",
@@ -384,6 +400,7 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     traces["step_2_discovery"] = {
         "title": "Route & Contract Discovery (agent)",
         "source_type": "AGENT_RUNTIME_DISCOVERY",
+        "provider": agent.name,
         "model": agent.model,
         "agent_turns": agent_trace.get("turns", []),
         "evidence": evidence,

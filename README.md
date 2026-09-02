@@ -39,6 +39,8 @@ python -m pytest tests/test_agent_discovery.py -k live   # live smoke test, skip
 | --- | --- |
 | `ANTHROPIC_API_KEY` | Enables runtime route discovery. Without it the system is cache-only |
 | `OMNIBRIDGE_WORKSPACE_ID` | Required **only** for identity-linked API keys, which are not scoped to one workspace and so cannot infer which one a request acts in. Without it the API refuses the call: *"anthropic-workspace-id is required…"*. A plain key needs nothing here. `ANTHROPIC_WORKSPACE_ID` is also read |
+| `OMNIBRIDGE_PROVIDER` | Which model provider answers discovery. Required only when more than one is configured — see [docs/PROVIDERS.md](docs/PROVIDERS.md) |
+| `OMNIBRIDGE_MODEL` | Override the provider's default model |
 | `OMNIBRIDGE_DISABLE_AGENT=1` | Forces the cache-only path |
 | `OMNIBRIDGE_MAX_RETRIES` | Discovery retry ceiling (default 3) |
 
@@ -80,7 +82,7 @@ The same six stages as a straight synchronous call, with approval as a terminal 
 | [`core/models.py`](omnibridge/core/models.py) | Pydantic contracts: `UserIntent`, `ChainInfo`, `RouteQuote`, `SimulationResult`, `ExecutionManifest`, `BroadcastReceipt` |
 | [`discovery/rpc_manager.py`](omnibridge/discovery/rpc_manager.py) | Chain metadata from the ChainList registry; refuses ambiguous or low-similarity matches; races public RPCs concurrently on `eth_blockNumber` |
 | [`discovery/route_finder.py`](omnibridge/discovery/route_finder.py) | Tier 0 `SKILL.md` cache lookup. Nothing else — discovery is the agent's job |
-| [`agent/`](omnibridge/agent/) | The reasoning core: the discovery loop, request budgets, on-chain provenance checks, and the deterministic proposal→calldata boundary |
+| [`agent/`](omnibridge/agent/) | The reasoning core. `contract.py` and `provider.py` are vendor-neutral — the answer shape, the schema, the prompt and provider selection; `discovery_agent.py` is the Anthropic implementation. Request budgets, on-chain provenance checks and the deterministic proposal→calldata boundary live here too |
 | [`core/executor.py`](omnibridge/core/executor.py) | ABI encoding via `encode_dynamic_calldata`, plus per-request parameter binding |
 | [`core/simulator.py`](omnibridge/core/simulator.py) | `eth_call` + `estimate_gas`; the revert circuit breaker |
 | [`core/signer.py`](omnibridge/core/signer.py) | Broadcast — raw RLP, or an already-submitted hash returned by a browser wallet |
