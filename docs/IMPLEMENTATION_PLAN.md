@@ -212,16 +212,39 @@ static templates did, and no way to change a prompt afterwards with any confiden
 
 ## Phase 0 — Unblock
 
-- **Declare missing dependencies** in `pyproject.toml`: `langgraph`, `langchain-core`, `fastapi`,
-  `uvicorn`, `eth-abi`. Verify against a clean venv.
+- **Make the package installable at all.** `pip install -e .` fails before it ever reaches
+  dependency resolution: setuptools finds `static`, `skills` and `omnibridge` as candidate
+  top-level packages in a flat layout and refuses to guess. The four `omnibridge/` subpackages
+  also have no `__init__.py`. Add those, then pin discovery with
+  `[tool.setuptools.packages.find] include = ["omnibridge*"]` and
+  `py-modules = ["graph", "server", "tools"]`.
+- **Declare missing dependencies** in `pyproject.toml`: `eth-abi`, `langgraph`, `langchain-core`,
+  `fastapi`, `uvicorn`. Verify against a clean venv.
 - **Fix `rpc-bench`** — `cli.py:67` calls `get_chain_info()`, which reads a cache that
   `discover_chain_metadata()` is what populates. Call the discovery path.
-- **Minimally repair route discovery** — the dangling names and missing `import re` in
-  `_query_online_route_manifest` (`route_finder.py:130-136`). Deliberately a repair and not an
-  improvement: the function is deleted in Phase 4, and the only goal is a green baseline.
+- **Minimally repair route discovery** — the missing `import re` and the four undefined names in
+  `_query_online_route_manifest`'s return dict, which would `NameError` on every success path.
+  A repair, not an improvement: the function is deleted in Phase 4. Where a value cannot be known
+  without the agent, it becomes an explicit unknown rather than an invented fact — and the
+  `destination_domain: chain_id % 10` expression is deleted outright, since a CCTP domain bears no
+  arithmetic relationship to a chain ID (Arbitrum is domain 3; `42161 % 10` is 1) and that value
+  would have encoded a wrong destination into real calldata.
 
-**Done when:** a clean install runs `pytest tests/` with 5 passing and `test_bridge_flow.py`
-completes end to end.
+**Done when:** `pip install -e .` succeeds in a clean venv, `server` / `graph` / `tools` import from
+it, and `pytest tests/` is green.
+
+**What Phase 0 cannot deliver.** The original criterion — "5 passing and `test_bridge_flow.py`
+completes end to end" — was wrong. `test_agent_in_transit_flow` asserts a *completed* bridge, and no
+router address is obtainable from any source: `web_search_tool` returns a fabricated hit containing
+no addresses (1.2), and the skill repository is empty. Supplying one by hand is precisely the curated
+router table Rule B forbids. The test is therefore marked `xfail(strict=True)` with that reasoning
+recorded in the marker — strict, so it becomes a tripwire that fires the moment Phase 3 makes it
+genuinely passable. A companion test asserts the property that *is* true today and should stay true:
+discovery refuses rather than inventing a router. `test_bridge_flow.py` is blocked on the same thing.
+
+Deferred to Phase 4: `omnibridge/discovery/route_finder.py` does `from tools import ...`, importing a
+top-level module from inside the package. That resolves under an editable install and breaks under a
+real one — but `tools.py` is replaced wholesale in Phase 3.2, so it is not worth restructuring now.
 
 ---
 

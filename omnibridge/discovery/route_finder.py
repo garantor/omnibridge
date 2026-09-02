@@ -4,6 +4,7 @@ Strict Error Transparency: Surfaces genuine discovery failures to the user.
 Zero synthetic fake addresses or silent swallows.
 """
 
+import re
 from typing import Optional, Dict, Any
 import requests
 from omnibridge.core.models import UserIntent, RouteQuote, ChainInfo
@@ -126,15 +127,21 @@ class RouteFinder:
         if not discovered_router:
             raise ValueError(f"Route Discovery Error: No verified router contract address found for {src_chain.name} -> {dst_chain.name}. Please verify bridge availability.")
 
+        # This function cannot identify the protocol, its fee, or its ABI — that is the
+        # agent's job (plan Phase 3), and this whole function is deleted in Phase 4.
+        # The four names below were previously undefined (NameError on every success path);
+        # they are now explicit unknowns rather than invented facts.
         return {
-            "name": bridge_name,
+            "name": "Unidentified Route",
             "router_contract": discovered_router,
             "source_token": discovered_src_token or f"NATIVE_{token_sym}",
             "dest_token": discovered_dst_token or f"NATIVE_{token_sym}",
-            "fee_pct": fee_pct,
-            "gas_units": gas_units,
-            "calldata_template": calldata_template,
-            "extra_params": {
-                "destination_domain": dst_chain.chain_id % 10,
-            },
+            "fee_pct": 0.0,
+            "gas_units": 0,
+            "calldata_template": "generic",
+            # NOTE: previously emitted {"destination_domain": dst_chain.chain_id % 10}.
+            # A CCTP domain has no arithmetic relationship to a chain ID (Arbitrum is
+            # domain 3, 42161 % 10 == 1), so that value would have encoded a wrong
+            # destination into real calldata. Removed rather than replaced.
+            "extra_params": {},
         }

@@ -64,12 +64,16 @@ def handle_list_skills(args):
 def handle_rpc_bench(args):
     """Benchmarks and races public RPCs for a chain."""
     rm = RPCManager()
-    chain = rm.get_chain_info(args.chain)
-    if not chain:
-        console.print(f"[red]Unknown chain {args.chain}[/red]")
+    # get_chain_info() only reads the cache that discover_chain_metadata() populates,
+    # so on a fresh RPCManager it always misses. Resolve, don't look up.
+    try:
+        chain = rm.discover_chain_metadata(args.chain)
+    except Exception as exc:
+        console.print(f"[red]Could not resolve chain '{args.chain}': {exc}[/red]")
         sys.exit(1)
 
-    console.print(f"[bold cyan]Racing RPCs for {chain.name}...[/bold cyan]")
+    # Show the resolved identity, not the string the user typed.
+    console.print(f"[bold cyan]Racing RPCs for {chain.name} ({chain.chain_id})...[/bold cyan]")
     fastest = rm.get_fastest_rpc_sync(args.chain)
     console.print(f"[bold green]✓ Fastest RPC endpoint:[/bold green] {fastest}")
 

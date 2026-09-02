@@ -17,6 +17,11 @@ dependencies = [
     "aiohttp>=3.8.0",
     "web3>=6.0.0",
     "eth-account>=0.8.0",
+    "eth-abi>=4.0.0",
+    "langgraph>=0.6.0",
+    "langchain-core>=0.3.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -27,3 +32,12 @@ dev = [
 
 [project.scripts]
 omnibridge = "omnibridge.cli:main"
+
+# Flat layout: without this, setuptools finds `static`, `skills` and `omnibridge`
+# as candidate top-level packages and refuses to guess, so `pip install -e .` fails
+# outright. graph/server/tools are top-level modules the package imports by name.
+[tool.setuptools.packages.find]
+include = ["omnibridge*"]
+
+[tool.setuptools]
+py-modules = ["graph", "server", "tools"]
