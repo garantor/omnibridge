@@ -26,12 +26,33 @@ class CalldataExecutor:
         """Encodes ERC-20 approve(address,uint256) -> 0x095ea7b3."""
         selector = bytes.fromhex("095ea7b3")
         checksum_spender = (
-            Web3.to_checksum_address(spender_address)
-            if spender_address.startswith("0x") and len(spender_address) == 42
-            else Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
+            CalldataExecutor.require_evm_address(spender_address, "spender_address")
         )
         encoded_args = encode(["address", "uint256"], [checksum_spender, amount_raw])
         return "0x" + (selector + encoded_args).hex()
+
+    @staticmethod
+    def require_evm_address(value: str, field: str) -> str:
+        """
+        Checksum an address, or raise.
+
+        Every call site used to read
+        `to_checksum_address(x) if x.startswith("0x") and len(x) == 42 else "0x000...0"`,
+        which silently turns an unusable address into the zero address. Encoded as a
+        recipient that is a burn, and it simulates perfectly — no revert, correct gas.
+        An explicit zero address still passes, since that is a real convention for a
+        native asset; what is refused is a substitution nobody asked for.
+        """
+        if not isinstance(value, str) or not value.startswith("0x") or len(value) != 42:
+            raise ValueError(
+                f"Invalid EVM address for {field}: {value!r}. Refusing to substitute the "
+                "zero address — that would silently redirect or burn the transfer."
+            )
+        try:
+            int(value, 16)
+        except ValueError:
+            raise ValueError(f"Invalid EVM address for {field}: {value!r} is not hex.")
+        return Web3.to_checksum_address(value)
 
     @classmethod
     def encode_cctp_deposit_for_burn(
@@ -50,11 +71,14 @@ class CalldataExecutor:
 
         recipient_b32 = cls.pad_bytes32_address(recipient_address)
         burn_token_checksum = (
-            Web3.to_checksum_address(burn_token_address)
-            if burn_token_address.startswith("0x") and len(burn_token_address) == 42
-            else Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
+            CalldataExecutor.require_evm_address(burn_token_address, "burn_token_address")
         )
-        valid_domain = int(destination_domain) if destination_domain is not None else 0
+        if destination_domain is None:
+            raise ValueError(
+                "CCTP destinationDomain is required. Defaulting it to 0 would encode "
+                "Ethereum as the destination — a wrong chain, not an absent one."
+            )
+        valid_domain = int(destination_domain)
 
         encoded_args = encode(
             ["uint256", "uint32", "bytes32", "address"],
@@ -98,14 +122,14 @@ class CalldataExecutor:
                 "bytes",
             ],
             [
-                Web3.to_checksum_address(depositor) if depositor.startswith("0x") and len(depositor) == 42 else "0x0000000000000000000000000000000000000000",
-                Web3.to_checksum_address(recipient) if recipient.startswith("0x") and len(recipient) == 42 else "0x0000000000000000000000000000000000000000",
-                Web3.to_checksum_address(input_token) if input_token.startswith("0x") and len(input_token) == 42 else "0x0000000000000000000000000000000000000000",
-                Web3.to_checksum_address(output_token) if output_token.startswith("0x") and len(output_token) == 42 else "0x0000000000000000000000000000000000000000",
+                CalldataExecutor.require_evm_address(depositor, "depositor"),
+                CalldataExecutor.require_evm_address(recipient, "recipient"),
+                CalldataExecutor.require_evm_address(input_token, "input_token"),
+                CalldataExecutor.require_evm_address(output_token, "output_token"),
                 input_amount,
                 output_amount,
                 destination_chain_id,
-                Web3.to_checksum_address(relayer) if relayer.startswith("0x") and len(relayer) == 42 else "0x0000000000000000000000000000000000000000",
+                CalldataExecutor.require_evm_address(relayer, "relayer"),
                 quote_timestamp,
                 fill_deadline,
                 exclusivity_deadline,
@@ -120,6 +144,27 @@ class CalldataExecutor:
         selector = Web3.keccak(text=func_sig)[:4]
         encoded_args = encode(param_types, param_values)
         return "0x" + (selector + encoded_args).hex()
+
+    @classmethod
+    def decode_leading_uint256(cls, calldata: str) -> Optional[int]:
+        """
+        Read the first 32-byte argument word out of encoded calldata.
+
+        Every encoder in this class places the transfer amount first, so this recovers
+        the amount that is genuinely in the transaction rather than the one the intent
+        asked for. Deliberately dumb: it reads bytes and consults nothing else, which is
+        the entire point — a manifest rendered from the same source as the transaction
+        cannot reveal a scaling error in it.
+
+        Returns None when the payload is not ABI-encoded (e.g. a Soroban invoke blob).
+        """
+        try:
+            raw = calldata[2:] if calldata.startswith("0x") else calldata
+            if len(raw) < 8 + 64:
+                return None
+            return int(raw[8:8 + 64], 16)
+        except (ValueError, TypeError):
+            return None
 
     @classmethod
     def build_calldata_for_route(
@@ -159,7 +204,7 @@ class CalldataExecutor:
             ["uint256", "address", "uint256"],
             [
                 quote.deposit_amount_raw,
-                Web3.to_checksum_address(recipient) if recipient.startswith("0x") and len(recipient) == 42 else "0x0000000000000000000000000000000000000000",
+                CalldataExecutor.require_evm_address(recipient, "recipient"),
                 quote.dest_chain_id,
             ],
         )

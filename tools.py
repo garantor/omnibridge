@@ -83,13 +83,13 @@ def web_search_tool(query: str) -> str:
     except Exception as e:
         console.print(f"   [dim]↳ Bridge index query: {e}[/dim]")
 
-    # If no hits, provide synthetic structured web result
-    if not raw_hits:
-        raw_hits.append({
-            "title": f"Web3 Cross-Chain Docs: {query}",
-            "source": "https://docs.circle.com / https://across.to",
-            "snippet": f"Official router contracts and public RPC endpoints resolved for query '{query}'."
-        })
+    # No synthetic fallback. This previously appended a fabricated hit that echoed the
+    # query back with docs.circle.com hardcoded as its source and claimed "official
+    # router contracts and public RPC endpoints resolved" — text that then flowed into
+    # route discovery as if it had come from the web. Because DuckDuckGo's Instant
+    # Answer API returns entity abstracts rather than search results, and is empty for
+    # nearly every technical query, that fabricated branch was the normal path.
+    # An empty result is empty.
 
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -180,13 +180,13 @@ def python_repl_runner(code: str) -> str:
 
 
 @tool
-def eth_call_simulator(rpc_url: str, from_address: str, to_address: str, data: str, value: int = 0) -> str:
+def eth_call_simulator(rpc_url: str, from_address: str, to_address: str, data: str, value: int = 0, expected_chain_id: Optional[int] = None) -> str:
     """Executes a dry-run static call (eth_call) against a public RPC to verify zero-revert conditions and gas estimation."""
     console.print(f"\n[bold cyan]🧪 [LANGCHAIN TOOL CALL] -> eth_call_simulator[/bold cyan]")
     console.print(f"   [bold yellow]↳ Target RPC:[/bold yellow] [white]{rpc_url}[/white]")
     console.print(f"   [bold yellow]↳ From:[/bold yellow] [white]{from_address}[/white] ➔ [bold yellow]To:[/bold yellow] [white]{to_address}[/white]")
 
-    sim = Simulator(rpc_url)
+    sim = Simulator(rpc_url, expected_chain_id=expected_chain_id)
     res = sim.simulate_call(
         from_address=from_address,
         to_address=to_address,

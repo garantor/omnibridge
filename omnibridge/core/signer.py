@@ -102,6 +102,14 @@ class Signer:
                 timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             )
 
-        signed_hex = raw_tx_payload.get("signed_hex") or raw_tx_payload.get("tx_hash") or raw_tx_payload.get("data")
+        # Deliberately NOT falling back to raw_tx_payload["data"]. That is the unsigned
+        # calldata; treating it as a signed transaction is a silent substitution on the
+        # broadcast path. With no key and no signature, refuse.
+        signed_hex = raw_tx_payload.get("signed_hex") or raw_tx_payload.get("tx_hash")
+        if not signed_hex:
+            raise ValueError(
+                "Refusing to broadcast: no private key, no signed transaction, and no "
+                "on-chain hash was supplied. Sign with a connected wallet or pass a key."
+            )
         dyn_chain_id = raw_tx_payload.get("chainId") or (self.w3.eth.chain_id if (self.w3 and self.w3.is_connected()) else 1)
         return self.broadcast_raw_transaction(signed_hex, chain_id=dyn_chain_id)

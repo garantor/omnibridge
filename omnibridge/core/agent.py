@@ -29,22 +29,27 @@ class OmnibridgeAgent:
     def run_flow(
         self,
         intent: UserIntent,
-        sender_address: str = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+        sender_address: str,
         private_key: Optional[str] = None,
         auto_approve: bool = False,
+        dry_run: bool = False,
     ) -> Dict[str, Any]:
         """Executes the complete In-Transit Bridging pipeline."""
         console.print(f"[bold cyan]🔍 STEP 1: Route Discovery & RPC Race for {intent.amount} {intent.token} ({intent.source_chain} ➔ {intent.dest_chain})...[/bold cyan]")
         
         # 1. Resolve Route & Quote
         quote = self.route_finder.discover_route(intent)
-        src_chain_info = self.rpc_manager.discover_chain_metadata(intent.source_chain)
-        if not src_chain_info:
-            raise ValueError(f"Source chain {intent.source_chain} metadata not found")
+        src_chain_info = self.rpc_manager.discover_chain_metadata(
+            intent.source_chain, network=intent.network
+        )
 
         # Fast RPC race
         fastest_rpc = self.rpc_manager.get_fastest_rpc_sync(intent.source_chain)
-        console.print(f"   [green]✓ Selected Route:[/green] {quote.bridge_name} on {src_chain_info.name}")
+        # Show the resolved identity, not the string that was typed.
+        console.print(
+            f"   [green]✓ Selected Route:[/green] {quote.bridge_name} on "
+            f"{src_chain_info.name} ({src_chain_info.chain_id})"
+        )
         console.print(f"   [green]✓ Active RPC:[/green] {fastest_rpc}")
 
         # 2. In-Transit Calldata Assembly
@@ -54,7 +59,10 @@ class OmnibridgeAgent:
 
         # 3. Dry-Run Simulation & Circuit Breaker
         console.print("[bold cyan]🧪 STEP 3: Live eth_call Dry-Run & Simulation...[/bold cyan]")
-        simulator = Simulator(fastest_rpc)
+        # Hand the simulator every endpoint, preferring the raced winner, and tell it
+        # which chain these are supposed to be so it can reject an impostor.
+        rpc_candidates = [fastest_rpc] + [u for u in src_chain_info.rpc_urls if u != fastest_rpc]
+        simulator = Simulator(rpc_candidates, expected_chain_id=src_chain_info.chain_id)
         min_output = int(quote.estimated_output_raw * (1 - (intent.max_slippage_bps / 10000.0)))
         
         sim_res = simulator.simulate_call(
@@ -66,20 +74,35 @@ class OmnibridgeAgent:
             quote=quote,
         )
 
+        # Only VERIFIED continues. UNAVAILABLE and UNSUPPORTED are refusals, not passes.
         if not sim_res.success:
-            console.print(f"[bold red]⛔ CIRCUIT BREAKER TRIPPED:[/bold red] {sim_res.revert_reason}")
+            console.print(
+                f"[bold red]⛔ CIRCUIT BREAKER TRIPPED [{sim_res.status.value}]:[/bold red] "
+                f"{sim_res.revert_reason}"
+            )
             return {
                 "status": "simulation_failed",
+                "simulation_status": sim_res.status.value,
                 "error": sim_res.revert_reason,
                 "route": quote.model_dump(),
             }
 
-        console.print(f"   [green]✓ Simulation Passed:[/green] Est Gas: {sim_res.gas_used} units (${sim_res.estimated_gas_cost_usd:.4f} USD)")
+        console.print(
+            f"   [green]✓ Simulation VERIFIED on chain {sim_res.simulated_on_chain_id}:[/green] "
+            f"Est Gas: {sim_res.gas_used} units (${sim_res.estimated_gas_cost_usd:.4f} USD)"
+        )
 
         # 4. Human-in-the-Loop Approval Manifest
         console.print("[bold cyan]📋 STEP 4: Human-in-the-Loop Verification Manifest...[/bold cyan]")
+        # Recover the amount from the bytes that will actually be signed, so a scaling
+        # error cannot hide behind a manifest rendered from the same source as the intent.
+        decoded_raw = CalldataExecutor.decode_leading_uint256(calldata)
+        decoded_amount = (
+            decoded_raw / (10 ** quote.decimals) if decoded_raw is not None else None
+        )
+
         manifest = ExecutionManifest(
-            source_chain=intent.source_chain,
+            source_chain=src_chain_info.name,
             source_chain_id=quote.source_chain_id,
             dest_chain=intent.dest_chain,
             dest_chain_id=quote.dest_chain_id,
@@ -90,12 +113,15 @@ class OmnibridgeAgent:
             amount_out_est=quote.estimated_output_raw / (10 ** quote.decimals),
             min_amount_out=min_output / (10 ** quote.decimals),
             slippage_percent=intent.max_slippage_bps / 100.0,
-            gas_cost_usd=sim_res.estimated_gas_cost_usd,
+            gas_cost_usd=sim_res.estimated_gas_cost_usd or 0.0,
             bridge_fee_usd=quote.fee_amount_usd,
-            total_cost_usd=sim_res.estimated_gas_cost_usd + quote.fee_amount_usd,
+            total_cost_usd=(sim_res.estimated_gas_cost_usd or 0.0) + quote.fee_amount_usd,
             raw_to=quote.router_address,
             raw_value_wei=0,
             raw_data=calldata,
+            simulation_status=sim_res.status.value,
+            simulated_on_chain_id=sim_res.simulated_on_chain_id,
+            amount_in_decoded=decoded_amount,
         )
 
         ManifestFormatter.render(manifest)
@@ -114,7 +140,10 @@ class OmnibridgeAgent:
             "data": calldata,
             "value": 0,
         }
-        receipt = signer.broadcast_transaction(tx_payload, private_key=private_key, dry_run=(private_key is None))
+        # Broadcast semantics are explicit and identical in both runtimes: a rehearsal
+        # happens only when the caller asks for one, never as a side effect of not
+        # having supplied a key.
+        receipt = signer.broadcast_transaction(tx_payload, private_key=private_key, dry_run=dry_run)
         console.print(f"   [bold green]✓ Broadcast Confirmed:[/bold green] Tx Hash {receipt.tx_hash}")
         console.print(f"   [blue]Explorer Link:[/blue] {receipt.explorer_url}")
 

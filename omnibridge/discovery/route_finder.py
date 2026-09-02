@@ -32,9 +32,10 @@ class RouteFinder:
         if not src_name or not dst_name:
             raise ValueError(f"Intent Error: Source chain and destination chain must be provided. Got: from '{src_name}' to '{dst_name}'")
 
-        # Dynamically discover chain metadata
-        src_chain = self.rpc_manager.discover_chain_metadata(src_name)
-        dst_chain = self.rpc_manager.discover_chain_metadata(dst_name)
+        # Dynamically discover chain metadata. The intent's network family is carried
+        # through so a mainnet request can never resolve onto a testnet.
+        src_chain = self.rpc_manager.discover_chain_metadata(src_name, network=intent.network)
+        dst_chain = self.rpc_manager.discover_chain_metadata(dst_name, network=intent.network)
 
         decimals = 6 if token_sym in ("USDC", "USDT") else 18
         raw_amount = int(intent.amount * (10 ** decimals))

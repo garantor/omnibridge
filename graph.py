@@ -14,7 +14,8 @@ from omnibridge.skills.manager import SkillManager, SkillMetadata
 from omnibridge.discovery.rpc_manager import RPCManager
 from omnibridge.discovery.route_finder import RouteFinder
 from omnibridge.core.executor import CalldataExecutor
-from omnibridge.core.simulator import Simulator
+from omnibridge.core.simulator import Simulator, is_evm_address
+from omnibridge.core.models import SimulationStatus
 from omnibridge.core.signer import Signer
 from tools import LOCAL_SKILLS_DIR
 
@@ -53,24 +54,56 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
     dst = state.get("target_chain") or ""
     amt = float(state.get("amount") or 0.0)
     tok = state.get("asset") or ""
-    user_addr = state.get("user_address") or "0x0000000000000000000000000000000000000000"
+    # No zero-address default. It reads as a valid EVM address everywhere downstream,
+    # so a missing wallet would simulate from 0x0 and encode 0x0 as the recipient —
+    # a burn, dressed as a transfer.
+    user_addr = (state.get("user_address") or "").strip()
+    if not is_evm_address(user_addr):
+        raise ValueError(
+            f"Intent Error: no valid sender address supplied (got {user_addr!r}). "
+            "Connect a wallet — simulating from any other account would not describe "
+            "this transfer."
+        )
     slip = state.get("slippage") or "0.5%"
 
     if raw:
-        match = re.search(r"bridge\s+(\d+(?:\.\d+)?)\s*([a-zA-Z0-9_-]+)?\s+from\s+([a-zA-Z0-9_-]+)\s+to\s+([a-zA-Z0-9_-]+)", raw, re.IGNORECASE)
+        # The verb set is widened beyond the literal word "bridge". Where no destination
+        # asset is named, swap/send/move/transfer all denote the same operation.
+        match = re.search(
+            r"(?:bridge|swap|send|move|transfer)\s+(\d+(?:\.\d+)?)\s*([a-zA-Z0-9_-]+)?"
+            r"\s+from\s+([a-zA-Z0-9_-]+)\s+to\s+([a-zA-Z0-9_-]+)",
+            raw,
+            re.IGNORECASE,
+        )
         if match:
             amt = float(match.group(1))
             if match.group(2):
                 tok = match.group(2).upper()
-            src = match.group(3).capitalize()
-            dst = match.group(4).capitalize()
+            src = match.group(3)
+            dst = match.group(4)
 
-    if not src or not dst:
-        # Require actual user input entities
-        src = src or "Unknown"
-        dst = dst or "Unknown"
-        tok = tok or "NATIVE"
-        amt = amt if amt > 0 else 1.0
+    # No defaults block. This previously substituted "Unknown"/"Unknown"/1.0 NATIVE for
+    # anything it could not parse and then reported status "PARSED" / "COMPLETED", so
+    # "swap 100 usdc from base to stellar" silently became "1.0 NATIVE Unknown -> Unknown".
+    # There is no such thing as a partially understood instruction to move money.
+    missing = [
+        label
+        for label, value in (
+            ("source chain", src),
+            ("destination chain", dst),
+            ("asset", tok),
+        )
+        if not value
+    ]
+    if missing or amt <= 0:
+        if amt <= 0:
+            missing.append("amount")
+        raise ValueError(
+            "Intent Error: could not determine "
+            + ", ".join(missing)
+            + f" from input {raw!r}. Expected something like "
+            "'bridge 100 USDC from base to arbitrum', or supply the fields directly."
+        )
 
     from rich.console import Console
     from rich.panel import Panel
@@ -245,9 +278,15 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
     from rich.panel import Panel
     _console = Console()
 
-    rpc_url = state.get("active_rpc") or rpc_mgr.get_fastest_rpc_sync(state.get("source_chain", "base"))
-    sim = Simulator(rpc_url)
-    
+    src_name = state["source_chain"]
+    src_info = rpc_mgr.discover_chain_metadata(src_name)
+    rpc_url = state.get("active_rpc") or rpc_mgr.get_fastest_rpc_sync(src_name)
+
+    # Every endpoint, preferred order, plus the chain these are supposed to be so an
+    # impostor node cannot answer the only question that gates this graph.
+    rpc_candidates = [rpc_url] + [u for u in src_info.rpc_urls if u != rpc_url]
+    sim = Simulator(rpc_candidates, expected_chain_id=src_info.chain_id)
+
     sim_res = sim.simulate_call(
         from_address=state["user_address"],
         to_address=state["route"]["router_address"],
@@ -257,13 +296,21 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
 
     # PRINT 4: Then print Simulation Result
     status_color = "green" if sim_res.success else "red"
+    gas_line = f"{sim_res.gas_used} gas" if sim_res.gas_used is not None else "not measured"
+    usd_line = (
+        f"${sim_res.estimated_gas_cost_usd:.4f}"
+        if sim_res.estimated_gas_cost_usd is not None
+        else "not measured"
+    )
     _console.print(Panel(
-        f"[bold {status_color}]Simulation Success:[/bold {status_color}] {sim_res.success}\n"
-        f"[bold white]Target RPC Node:[/bold white] {rpc_url}\n"
-        f"[bold white]Gas Units Used:[/bold white] {sim_res.gas_used} gas\n"
-        f"[bold white]Estimated Gas Cost USD:[/bold white] ${sim_res.estimated_gas_cost_usd:.4f}\n"
-        f"[bold white]Zero Reverts Verification:[/bold white] {'✓ PASSED (Safe to Execute)' if sim_res.success else '❌ REVERT DETECTED'}\n"
-        + (f"[bold red]Revert Reason:[/bold red] {sim_res.revert_reason}" if not sim_res.success else ""),
+        f"[bold {status_color}]Simulation Status:[/bold {status_color}] {sim_res.status.value}\n"
+        f"[bold white]Target RPC Node:[/bold white] {sim_res.simulated_via_rpc or rpc_url}\n"
+        f"[bold white]Verified Chain ID:[/bold white] {sim_res.simulated_on_chain_id}\n"
+        f"[bold white]Gas Units Used:[/bold white] {gas_line}\n"
+        f"[bold white]Estimated Gas Cost USD:[/bold white] {usd_line}\n"
+        f"[bold white]Verdict:[/bold white] "
+        f"{'✓ VERIFIED against a live node' if sim_res.success else '❌ NOT VERIFIED — refusing to proceed'}\n"
+        + (f"[bold red]Reason:[/bold red] {sim_res.revert_reason}" if not sim_res.success else ""),
         title=f"[bold {status_color}]🧪 [STEP 4: LIVE DRY-RUN SIMULATION (eth_call)][/bold {status_color}]",
         border_style=status_color
     ))
@@ -273,8 +320,10 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
         "title": "Dry-Run Simulation (eth_call)",
         "rpc_endpoint": rpc_url,
         "method": "eth_call / static gas estimation",
+        "simulation_status": sim_res.status.value,
         "simulation_passed": sim_res.success,
-        "zero_reverts_verified": True if sim_res.success else False,
+        "verified_chain_id": sim_res.simulated_on_chain_id,
+        "scope": "source leg only — the destination leg is not verifiable by eth_call",
         "gas_units": sim_res.gas_used,
         "estimated_gas_usd": sim_res.estimated_gas_cost_usd,
         "revert_reason": sim_res.revert_reason if not sim_res.success else None,
@@ -283,7 +332,7 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
 
     return {
         "simulation_result": sim_res.model_dump(),
-        "estimated_gas_usd": sim_res.estimated_gas_cost_usd,
+        "estimated_gas_usd": sim_res.estimated_gas_cost_usd or 0.0,
         "status": "SIMULATION_PASSED" if sim_res.success else "SIMULATION_FAILED",
         "error": sim_res.revert_reason if not sim_res.success else None,
         "traces": traces,
@@ -291,9 +340,48 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
 
 
 def route_after_simulation(state: GraphState) -> str:
-    if state["simulation_result"] and state["simulation_result"].get("success"):
+    """
+    The only branch in the graph, so it has to be able to say no.
+
+    VERIFIED means an eth_call completed against a node whose identity was checked.
+    REVERTED, UNAVAILABLE and UNSUPPORTED are all refusals — in particular UNAVAILABLE
+    ("could not check") must never read as a pass.
+    """
+    result = state.get("simulation_result") or {}
+    if result.get("status") == SimulationStatus.VERIFIED.value:
         return "hitl_gate_node"
     return "error_node"
+
+
+def validate_resume_payload(resume_data: Any, unsigned_hex: Optional[str]) -> str:
+    """
+    Turn a resume payload into a signed transaction, or refuse.
+
+    A malformed resume is a rejection, not an approval. The gate previously fell back to
+    state["unsigned_transaction_hex"] whenever resume_data was not a dict, and still
+    returned USER_APPROVED — so a malformed payload carried an *unsigned* transaction
+    forward as though a human had signed it.
+    """
+    if not isinstance(resume_data, dict):
+        raise ValueError(
+            f"Approval Error: resume payload was {type(resume_data).__name__}, expected "
+            "an object containing 'signed_transaction_hex'. Treating this as a rejection."
+        )
+
+    signed_hex = resume_data.get("signed_transaction_hex")
+    if not isinstance(signed_hex, str) or not signed_hex.strip():
+        raise ValueError(
+            "Approval Error: resume payload carried no 'signed_transaction_hex'. "
+            "Nothing was signed, so nothing is approved."
+        )
+
+    signed_hex = signed_hex.strip()
+    if signed_hex == (unsigned_hex or "").strip():
+        raise ValueError(
+            "Approval Error: the resumed payload is the unsigned calldata, not a signed "
+            "transaction. Refusing to treat it as approved."
+        )
+    return signed_hex
 
 
 # --- NODE 5: Human-in-the-Loop Interrupt Gate ---
@@ -315,11 +403,7 @@ def hitl_gate_node(state: GraphState) -> Dict[str, Any]:
     # Native LangGraph Interrupt: Pauses graph and yields telemetry + approval payload
     resume_data = interrupt(approval_payload)
 
-    signed_hex = (
-        resume_data.get("signed_transaction_hex")
-        if isinstance(resume_data, dict)
-        else state.get("unsigned_transaction_hex")
-    )
+    signed_hex = validate_resume_payload(resume_data, state.get("unsigned_transaction_hex"))
 
     return {
         "signed_transaction_hex": signed_hex,

@@ -406,6 +406,40 @@ they are the regression net for every phase after this one.
 **Done when:** no path reaches the approval gate without a `VERIFIED` simulation, no layer
 manufactures a result it did not obtain, and every failure above halts with a specific reason.
 
+### Found while implementing Phase 1
+
+Six substitutions of the same shape that the plan had not catalogued. Each produced a
+transaction that would simulate perfectly while doing the wrong thing, which is the
+signature of a Rule A failure — and none would have been caught by the simulator, however
+honest it became.
+
+- **`RPCManager` fabricated a chain ID.** The old non-EVM fallback ended in
+  `ChainInfo(chain_id=1, ...)` — Ethereum mainnet's id — for *whatever* chain had been
+  asked for. Stellar, Solana, anything. That id then flows into the signed transaction.
+  The web-search RPC path is deleted: URLs scraped from search text cannot establish a
+  chain identity, and inventing one is worse than refusing.
+- **The block explorer was invented** as `https://{name}scan.io` whenever the registry had
+  none. Now empty.
+- **`graph.py` defaulted a missing wallet to the zero address.** It reads as a valid EVM
+  address everywhere downstream, so the transfer would simulate and encode as a burn.
+- **`signer.broadcast_transaction` fell back to `raw_tx_payload["data"]`** — the *unsigned*
+  calldata — when given no key and no signature, treating it as a signed transaction.
+- **Eight call sites in `executor.py`** read
+  `to_checksum_address(x) if x.startswith("0x") and len(x) == 42 else "0x000…0"`. An
+  unusable recipient silently became the zero address. A Stellar `G…` recipient reaching an
+  EVM encoder is precisely this case, and the result is a burn with a clean gas estimate.
+  Replaced with `require_evm_address`, which raises; an *explicit* zero address still
+  passes, since that is a real convention for a native asset.
+- **CCTP's `destination_domain` defaulted to 0**, which is Ethereum — a wrong chain, not an
+  absent one. Now required.
+
+`intent_parser_node` also gained the widened verb set from 1.1, so `swap` / `send` / `move`
+/ `transfer` parse; combined with the deleted defaults block, `swap 100 usdc from base to
+stellar` now resolves Base correctly and fails honestly on Stellar instead of silently
+becoming `1.0 NATIVE Unknown -> Unknown`.
+
+Coverage lives in `tests/test_guardrails.py` — 31 tests, every one asserting a refusal.
+
 ---
 
 ## Phase 2 — Evaluation harness

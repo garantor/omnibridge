@@ -29,8 +29,9 @@ def handle_bridge(args):
     agent = OmnibridgeAgent()
     agent.run_flow(
         intent=intent,
-        sender_address=args.sender or "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+        sender_address=args.sender,
         auto_approve=args.yes,
+        dry_run=args.dry_run,
     )
 
 
@@ -89,10 +90,13 @@ def main():
     bridge_parser.add_argument("--from", "--src", dest="source_chain", required=True, help="Source chain")
     bridge_parser.add_argument("--to", "--dst", dest="dest_chain", required=True, help="Destination chain")
     bridge_parser.add_argument("--recipient", "-r", default=None, help="Recipient address on destination")
-    bridge_parser.add_argument("--sender", "-s", default="0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", help="Sender address")
+    # Required: simulating from anyone else's account reports their balances and
+    # allowances, which says nothing about this transfer.
+    bridge_parser.add_argument("--sender", "-s", required=True, help="Your sender address")
     bridge_parser.add_argument("--slippage-bps", type=int, default=50, help="Max slippage in basis points (50 = 0.5%)")
     bridge_parser.add_argument("--priority", default="low_fee", choices=["low_fee", "fastest", "native"])
     bridge_parser.add_argument("--yes", "-y", action="store_true", help="Auto-approve without interactive prompt (for tests/automation)")
+    bridge_parser.add_argument("--dry-run", action="store_true", help="Rehearse without broadcasting; never inferred from a missing key")
 
     # List skills subcommand
     subparsers.add_parser("list-skills", help="List persistent SKILL.md modules")
