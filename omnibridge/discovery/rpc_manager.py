@@ -93,7 +93,6 @@ class RPCManager:
             pass
 
         # 2. Non-EVM Live Web Search Discovery (for Stellar, Solana, Near, Cosmos, etc.)
-        # Real search extraction of public RPC URLs
         real_rpcs = []
         try:
             from tools import web_search_tool
@@ -101,26 +100,27 @@ class RPCManager:
             search_results = web_search_tool.invoke(search_query)
             
             # Extract http/https URLs from search text
-            found_urls = re.findall(r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[a-zA-Z0-9._~:/?#[\]@!$&\'()*+,;=-]*)?', search_results)
+            found_urls = re.findall(r'https?://[a-zA-Z0-9.-]+(?::[0-9]+)?(?:/[^\s()\'"<>]+)?', search_results)
             # Filter for likely RPC hostnames
-            real_rpcs = [u for u in found_urls if any(kw in u for kw in ("rpc", "horizon", "api", "node", "mainnet", "stellar", "solana"))]
+            real_rpcs = [u for u in found_urls if any(kw in u.lower() for kw in ("rpc", "horizon", "api", "node", "mainnet", "stellar", "solana", "chain"))]
         except Exception:
             pass
 
-        # If web search returned no RPC URLs, check the verified skill repository
+        # If web search returned no direct RPC URLs, check the verified skill repository
         if not real_rpcs:
-            cached_skill = None
             try:
                 from tools import skill_manager
                 for skill in skill_manager.list_skills():
-                    if skill.source_chain.lower() == key:
-                        real_rpcs = skill.rpc_fallbacks
-                        break
+                    m_src = skill.metadata.source_chain.lower().strip()
+                    if m_src == key or key in m_src or m_src in key:
+                        if skill.metadata.rpc_fallbacks:
+                            real_rpcs = list(skill.metadata.rpc_fallbacks)
+                            break
             except Exception:
                 pass
 
         if not real_rpcs:
-            raise ConnectionError(f"RPC Discovery Error: No active public RPC endpoints discovered for chain '{chain_name}'.")
+            raise ConnectionError(f"RPC Discovery Error: No active public RPC endpoints discovered for chain '{chain_name}'. Please specify or configure an active RPC endpoint.")
 
         discovered = ChainInfo(
             chain_id=1,

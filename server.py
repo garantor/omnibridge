@@ -92,9 +92,17 @@ def start_bridge_flow(req: StartBridgeRequest):
         "slippage": req.slippage,
     }
 
-    # Run the graph until the interrupt in Node 5
-    for event in graph.stream(initial_state, config=config):
-        pass
+    try:
+        # Run the graph until the interrupt in Node 5
+        for event in graph.stream(initial_state, config=config):
+            pass
+    except Exception as e:
+        return {
+            "status": "ERROR",
+            "thread_id": thread_id,
+            "error": str(e),
+            "traces": {},
+        }
 
     # Inspect current state checkpoint
     snapshot = graph.get_state(config)
