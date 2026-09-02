@@ -12,7 +12,6 @@ objects directly.
 
 import pytest
 
-from omnibridge.agent.budget import RequestBudget
 from omnibridge.agent.contract import (
     NO_ROUTE_FOUND_SCHEMA,
     PROPOSAL_REQUIRED_FIELDS,
@@ -22,6 +21,7 @@ from omnibridge.agent.contract import (
     RouteProposal,
 )
 from omnibridge.agent.discovery_agent import AnthropicDiscoveryAgent
+from omnibridge.agent.gemini_agent import GeminiDiscoveryAgent
 from omnibridge.agent.provider import (
     DiscoveryProvider,
     available_providers,
@@ -29,7 +29,7 @@ from omnibridge.agent.provider import (
 )
 
 #: Every provider that claims to implement the contract.
-PROVIDERS = [AnthropicDiscoveryAgent]
+PROVIDERS = [AnthropicDiscoveryAgent, GeminiDiscoveryAgent]
 
 VALID_PAYLOAD = {
     "protocol": "CCTP",

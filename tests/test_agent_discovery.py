@@ -7,10 +7,11 @@ budget ceilings — is verified without spending anything. A live smoke test liv
 bottom and skips unless credentials are present.
 """
 
-import os
 import types
 
 import pytest
+
+from tests.conftest import requires_live
 
 from omnibridge.agent.budget import BudgetExceeded, RequestBudget
 from omnibridge.agent.discovery_agent import (
@@ -237,10 +238,7 @@ def test_kill_switch(monkeypatch):
 # --------------------------------------------------------------- live smoke
 
 @pytest.mark.network
-@pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="no ANTHROPIC_API_KEY; the live path costs money and is opt-in",
-)
+@requires_live("ANTHROPIC_API_KEY")
 def test_live_discovery_base_to_arbitrum():
     """Real model call. Skipped by default; run deliberately with a key set."""
     budget = RequestBudget()

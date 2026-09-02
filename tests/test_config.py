@@ -5,8 +5,6 @@ Two properties matter, both about a config file not quietly doing the wrong thin
 real environment variable beats the file, and a file that sets nothing says so.
 """
 
-import pytest
-
 from omnibridge.config import find_env_file, load_env, parse_env_file
 
 

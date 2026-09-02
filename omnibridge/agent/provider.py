@@ -147,11 +147,24 @@ def available_providers() -> Dict[str, Type[DiscoveryProvider]]:
     return dict(_REGISTRY)
 
 
+_BUILTINS_LOADED = False
+
+
 def _load_builtins() -> None:
-    if _REGISTRY:
+    # Guarded by an explicit flag, not by the registry being empty. Any module that
+    # imports one provider directly registers it as a side effect, and an emptiness
+    # check would then treat the work as done — leaving every other provider silently
+    # unregistered and unselectable, which reads as "not supported" rather than "not
+    # loaded".
+    global _BUILTINS_LOADED
+    if _BUILTINS_LOADED:
         return
+    _BUILTINS_LOADED = True
     # Imported lazily so that an unconfigured provider's SDK never has to be installed.
+    # Each module registers its own class; a provider whose SDK is absent still
+    # registers, and reports the missing package only when actually selected.
     from omnibridge.agent import discovery_agent  # noqa: F401
+    from omnibridge.agent import gemini_agent  # noqa: F401
 
 
 def get_provider(name: Optional[str] = None, **kwargs) -> DiscoveryProvider:

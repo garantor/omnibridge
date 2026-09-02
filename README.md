@@ -21,8 +21,8 @@ The pipeline, the guardrails, the memory layer and the reasoning core are built.
 | Calldata encoding | Working — one generic path, driven by a signature the route carries |
 | Simulation & circuit breaker | Working on EVM against an identity-checked RPC; refuses (never passes) otherwise |
 | Chain-name resolution | Working — refuses ambiguous and low-similarity matches rather than guessing |
-| Reasoning core (Opus 5 + server-side search, provenance-checked proposals) | **Built, not verified against the live API** |
-| Dynamic route discovery | Works only with `ANTHROPIC_API_KEY` set; without it the system is cache-only |
+| Reasoning core — pluggable provider (Anthropic, Gemini), provenance-checked proposals | **Built, not verified against a live API** |
+| Dynamic route discovery | Needs a configured provider; without one the system is cache-only. See [docs/PROVIDERS.md](docs/PROVIDERS.md) |
 | Non-EVM preflight (Soroban, Solana) | **Not implemented** — those routes halt at the simulation gate |
 
 Concretely: with no credentials configured, **a route this system has not already verified is a route it does not have**, and it says so. That is the intended behaviour, not a gap — the previous fallbacks completed the same requests by inventing router addresses, ABI signatures and chain IDs.

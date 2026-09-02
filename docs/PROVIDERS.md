@@ -48,9 +48,43 @@ settle by dict ordering.
 ### Anthropic
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # identity-linked keys only
+ANTHROPIC_API_KEY=sk-ant-...
+OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # identity-linked keys only
 ```
+
+### Gemini
+
+```bash
+pip install -e ".[gemini]"
+```
+
+```dotenv
+OMNIBRIDGE_PROVIDER=gemini
+GEMINI_API_KEY=...
+OMNIBRIDGE_MODEL=gemini-2.5-pro   # optional
+```
+
+Structured in two phases, because Gemini refuses a request that declares Google Search
+grounding *and* function declarations together: research with grounding, then a second
+call with grounding dropped and function calling forced (`mode=ANY`, restricted to the
+two terminal functions). Two model calls per attempt, both charged to the budget.
+
+**Read this before trusting it.** Two guarantees are weaker than on the Anthropic path:
+
+- **No search allowlist.** `GoogleSearch` accepts `exclude_domains` only. The model can
+  read anything, so the allowlist degrades from a restriction on *browsing* to a filter
+  on *citations*, applied afterwards by `provenance.check_sources`. A page outside the
+  allowlist can still shape the answer; it just cannot be cited as evidence for it. The
+  provider records which URLs grounding actually fetched alongside the ones the model
+  claims, so a proposal citing pages it never read is visible in the trace.
+- **No strict schemas.** `parameters_json_schema` is a hint. `additionalProperties` is
+  stripped because Gemini's validator rejects it. A missing field is caught by
+  `RouteProposal.from_tool_input`, a malformed one by `synthesis._check_shape` — safe,
+  but caught later and less often than server-side enforcement.
+
+Everything downstream is unchanged: the selector is still recomputed, the router's
+bytecode still has to contain it, two independent sources are still required, and a
+real `eth_call` still has to pass before a human sees anything.
 
 ## Adding a provider
 

@@ -28,14 +28,9 @@ from graph import graph
 console = Console()
 
 
-@pytest.mark.xfail(
-    condition=not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")),
-    strict=True,
-    reason=(
-        "Needs the reasoning core to resolve a Base -> Solana router. Without "
-        "credentials the system is cache-only and the run ends at NO_ROUTE_FOUND. "
-        "Set ANTHROPIC_API_KEY to run it for real."
-    ),
+@pytest.mark.skipif(
+    os.environ.get("OMNIBRIDGE_LIVE_TESTS", "").strip().lower() not in ("1", "true", "yes"),
+    reason="live end-to-end run; set OMNIBRIDGE_LIVE_TESTS=1 to run (costs money)",
 )
 def test_langgraph_bridge_flow():
     console.print("\n[bold magenta]====================================================================[/bold magenta]")

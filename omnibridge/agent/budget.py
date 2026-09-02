@@ -42,17 +42,30 @@ class RequestBudget:
                 f"Retry budget exhausted after {self.max_attempts} attempts."
             )
 
+    # Providers name the same three counters differently. Listed rather than adapted
+    # per-provider so a budget stays enforceable whoever answered — an unrecognised
+    # usage object would otherwise accrue zero tokens and make every ceiling unreachable.
+    _USAGE_ALIASES = {
+        "input_tokens": ("input_tokens", "prompt_token_count", "prompt_tokens"),
+        "output_tokens": ("output_tokens", "candidates_token_count", "completion_tokens"),
+        "cache_read_tokens": (
+            "cache_read_input_tokens",
+            "cached_content_token_count",
+            "cached_tokens",
+        ),
+    }
+
     def record_usage(self, usage: Any) -> None:
         """Accumulate one model response's usage. Tolerates a missing field."""
         self.model_calls += 1
-        for attr, target in (
-            ("input_tokens", "input_tokens"),
-            ("output_tokens", "output_tokens"),
-            ("cache_read_input_tokens", "cache_read_tokens"),
-        ):
-            value = getattr(usage, attr, None) if usage is not None else None
-            if isinstance(value, int):
-                setattr(self, target, getattr(self, target) + value)
+        if usage is None:
+            return
+        for target, names in self._USAGE_ALIASES.items():
+            for attr in names:
+                value = getattr(usage, attr, None)
+                if isinstance(value, int):
+                    setattr(self, target, getattr(self, target) + value)
+                    break
 
     @property
     def elapsed_seconds(self) -> float:
