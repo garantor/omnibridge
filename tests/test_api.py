@@ -128,3 +128,19 @@ def test_the_skills_listing_states_verification_status():
         assert "verified" in skill
         assert "last_failure" in skill
         assert "verification_count" in skill
+
+
+# --------------------------------------------------------------------- caching
+
+def test_the_ui_is_never_cached():
+    """
+    The page is the approval surface: a stale copy can show a verdict that does not
+    match what the server computed. Asset URLs carry a version query, but that only
+    helps if the document naming them is itself fresh — and index.html had no
+    cache-busting of its own, so a browser kept serving an old page pointing at an old
+    bundle, complete with the hardcoded verdicts that bundle contained.
+    """
+    for path in ("/", "/static/app.js", "/static/style.css"):
+        res = client.get(path)
+        assert res.status_code == 200, path
+        assert "no-store" in res.headers.get("cache-control", ""), path

@@ -61,11 +61,26 @@ if STATIC_DIR.exists():
     server_app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+# The page is the approval surface. A stale copy of it can show a verdict that does
+# not match what the server computed — which is exactly the class of failure the last
+# five phases were spent removing — so it is never cached. Asset URLs carry a version
+# query, but that only helps if the document naming them is itself fresh.
+_NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+
+
+@server_app.middleware("http")
+async def no_store_for_ui(request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers.update(_NO_STORE)
+    return response
+
+
 @server_app.get("/")
 def root():
     index_file = STATIC_DIR / "index.html"
     if index_file.exists():
-        return FileResponse(str(index_file))
+        return FileResponse(str(index_file), headers=_NO_STORE)
     return {
         "service": "Omnibridge Headless LangGraph Bridging Engine",
         "docs": "/docs",
