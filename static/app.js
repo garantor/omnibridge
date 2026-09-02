@@ -177,14 +177,27 @@ document.addEventListener("DOMContentLoaded", () => {
 
       skills.forEach((skill) => {
         const card = document.createElement("div");
-        card.className = "skill-card";
+        // A demoted skill is still on disk and still listed — the demotion is meant to
+        // be reversible — but it must not be presented as though it were serving.
+        card.className = `skill-card${skill.verified ? "" : " skill-demoted"}`;
         card.innerHTML = `
-          <div class="skill-name">⚡ ${skill.name}</div>
-          <div class="skill-desc">${skill.description || "Verified cross-chain routine."}</div>
-          <div class="skill-meta">
-            <span>${skill.source || "Base"} ➔ ${skill.destination || "Arbitrum"}</span>
-            <span>${skill.token || "USDC"}</span>
+          <div class="skill-name">
+            <span>${skill.verified ? "⚡" : "⚠"} ${esc(skill.name)}</span>
+            <span class="skill-badge ${skill.verified ? "ok" : "bad"}">${skill.verified ? "verified" : "demoted"}</span>
           </div>
+          <div class="skill-desc">${esc(skill.description) || "Cross-chain routine."}</div>
+          <div class="skill-meta">
+            <span>${esc(skill.source)} ➔ ${esc(skill.destination)}</span>
+            <span>${esc(skill.token)}</span>
+          </div>
+          <div class="skill-meta">
+            <span>${esc(skill.protocol) || "—"}</span>
+            <span>${skill.verified
+              ? `verified ${skill.verification_count}× · last ${esc(skill.last_verified) || "unknown"}`
+              : "not served"}</span>
+          </div>
+          ${skill.last_failure ? `<div class="skill-failure">Last failure: ${esc(skill.last_failure)}</div>` : ""}
+          ${skill.revisions ? `<div class="skill-meta"><span class="muted">${skill.revisions} earlier revision(s) retained</span></div>` : ""}
         `;
         skillsGrid.appendChild(card);
       });
@@ -196,52 +209,116 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshSkillsBtn.addEventListener("click", loadSkills);
   loadSkills();
 
-  // Render Telemetry Cards
-  function renderTelemetryCards(traces) {
+  // ---------------------------------------------------------------- helpers
+
+  function esc(value) {
+    if (value === null || value === undefined) return "";
+    return String(value).replace(/[&<>"']/g, (c) => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+    ));
+  }
+
+  // "not measured" is a real answer and must read as one. Rendering `undefined` or
+  // silently substituting 0 is how an unmeasured figure passes for a measured one.
+  function orUnmeasured(value, format) {
+    if (value === null || value === undefined) return `<span class="muted">not measured</span>`;
+    return esc(format ? format(value) : value);
+  }
+
+  const SIM_VERDICTS = {
+    VERIFIED: {
+      tag: "tag-green",
+      label: "✓ eth_call completed, no revert",
+      note: "Source leg only. No eth_call can prove funds arrive on the destination chain.",
+    },
+    REVERTED: {
+      tag: "tag-rose",
+      label: "✗ Reverted during eth_call",
+      note: "The node rejected this transaction. It was not sent.",
+    },
+    UNAVAILABLE: {
+      tag: "tag-amber",
+      label: "⚠ Could not check",
+      note: "No RPC endpoint could be reached and identity-checked. This is not a pass.",
+    },
+    UNSUPPORTED: {
+      tag: "tag-amber",
+      label: "⚠ No eth_call path",
+      note: "The chain being submitted to has no simulation path. Nothing was verified.",
+    },
+  };
+
+  function simVerdict(status) {
+    return SIM_VERDICTS[status] || {
+      tag: "tag-amber",
+      label: `⚠ ${status || "Unknown"}`,
+      note: "Simulation status is unknown. Treat this transaction as unverified.",
+    };
+  }
+
+  function explorerTxUrl(chainId, txHash) {
+    // Only chains the wallet is configured for. An unknown chain gets no link rather
+    // than a basescan.org link that would resolve to a different network's explorer.
+    const byChain = { 1: "https://etherscan.io", 10: "https://optimistic.etherscan.io",
+                      137: "https://polygonscan.com", 8453: "https://basescan.org",
+                      42161: "https://arbiscan.io" };
+    const base = byChain[Number(chainId)];
+    return base ? `${base}/tx/${txHash}` : null;
+  }
+
+  // ---------------------------------------------------------------- telemetry
+
+  function renderTelemetryCards(traces, data) {
     if (!traces) return "";
     let html = `<div class="telemetry-container">`;
 
     if (traces.step_1_intent) {
-      const t1 = traces.step_1_intent;
+      const p = traces.step_1_intent.parsed_parameters || {};
       html += `
         <div class="telemetry-step-card">
           <div class="telemetry-header">
-            <div class="telemetry-title"><span>🔍</span><span>Step 1: Intent & Parameter Parser</span></div>
-            <span class="telemetry-tag tag-blue">Parsed via NLP</span>
+            <div class="telemetry-title"><span>🧠</span><span>Step 1: Intent & Parameter Parser</span></div>
+            <span class="telemetry-tag tag-blue">Parsed</span>
           </div>
           <div class="telemetry-grid">
-            <div class="telemetry-item"><div class="telemetry-key">Raw Intent</div><div class="telemetry-val">"${t1.raw_input}"</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Route Direction</div><div class="telemetry-val">${t1.parsed_parameters.source_chain} ➔ ${t1.parsed_parameters.target_chain}</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Amount & Token</div><div class="telemetry-val">${t1.parsed_parameters.amount} ${t1.parsed_parameters.asset}</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Slippage Tolerance</div><div class="telemetry-val">${t1.parsed_parameters.slippage}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Raw Intent</div><div class="telemetry-val">"${esc(traces.step_1_intent.raw_input)}"</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Route Direction</div><div class="telemetry-val">${esc(p.source_chain)} ➔ ${esc(p.target_chain)}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Amount & Token</div><div class="telemetry-val">${esc(p.amount)} ${esc(p.asset)}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Sender</div><div class="telemetry-val">${esc(p.user_address)}</div></div>
           </div>
-        </div>
-      `;
+        </div>`;
     }
 
     if (traces.step_2_discovery) {
       const t2 = traces.step_2_discovery;
-      const isSkill = t2.source_type === "SKILL_MEMORY_CACHE";
+      const kind = {
+        SKILL_MEMORY_CACHE: { tag: "tag-purple", label: "⚡ Skill cache hit" },
+        AGENT_RUNTIME_DISCOVERY: { tag: "tag-green", label: "🤖 Discovered at runtime" },
+        AGENT_NO_ROUTE: { tag: "tag-amber", label: "⚠ No route found" },
+      }[t2.source_type] || { tag: "tag-blue", label: esc(t2.source_type) };
+
+      const ev = data && data.agent_evidence;
+      const prov = ev && ev.provenance;
+      const proposal = ev && ev.proposal;
+
       html += `
         <div class="telemetry-step-card">
           <div class="telemetry-header">
-            <div class="telemetry-title"><span>🌐</span><span>Step 2: Route Discovery & Registry Resolution</span></div>
-            <span class="telemetry-tag ${isSkill ? 'tag-purple' : 'tag-green'}">${isSkill ? '⚡ Skill Cache Hit (0ms)' : '🔍 Live Web Docs Discovery'}</span>
+            <div class="telemetry-title"><span>🌐</span><span>Step 2: Route Discovery</span></div>
+            <span class="telemetry-tag ${kind.tag}">${kind.label}</span>
           </div>
           <div class="telemetry-grid">
-            <div class="telemetry-item"><div class="telemetry-key">LangChain Search Query</div><div class="telemetry-val" style="font-size: 0.8rem;">"${t2.search_query}"</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Discovered Protocol</div><div class="telemetry-val" style="color: #a5b4fc;">${t2.discovered_route}</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Router Contract</div><div class="telemetry-val">${t2.router_contract}</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Active Public RPC</div><div class="telemetry-val" style="color: #6ee7b7;">${t2.active_rpc}</div></div>
+            ${t2.discovered_route ? `<div class="telemetry-item"><div class="telemetry-key">Protocol</div><div class="telemetry-val">${esc(t2.discovered_route)}</div></div>` : ""}
+            ${t2.router_contract ? `<div class="telemetry-item"><div class="telemetry-key">Router Contract</div><div class="telemetry-val">${esc(t2.router_contract)}</div></div>` : ""}
+            ${t2.function_signature || (proposal && proposal.function_signature) ? `<div class="telemetry-item"><div class="telemetry-key">Function</div><div class="telemetry-val">${esc(t2.function_signature || proposal.function_signature)}</div></div>` : ""}
+            ${t2.skill_name ? `<div class="telemetry-item"><div class="telemetry-key">Replayed Skill</div><div class="telemetry-val">${esc(t2.skill_name)}</div></div>` : ""}
+            ${t2.active_rpc ? `<div class="telemetry-item"><div class="telemetry-key">Active RPC</div><div class="telemetry-val">${esc(t2.active_rpc)}</div></div>` : ""}
+            ${t2.model ? `<div class="telemetry-item"><div class="telemetry-key">Model</div><div class="telemetry-val">${esc(t2.model)}</div></div>` : ""}
           </div>
-          ${t2.web_search_tool_output ? `
-            <div style="margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">
-              🔍 LangChain web_search_tool Output:
-            </div>
-            <pre class="code-box" style="color: var(--accent-cyan); font-size: 0.75rem; max-height: 90px;">${t2.web_search_tool_output}</pre>
-          ` : ''}
-        </div>
-      `;
+          ${t2.reason ? `<p class="telemetry-note">${esc(t2.reason)}</p>` : ""}
+          ${prov ? renderProvenance(prov, proposal) : ""}
+          ${t2.budget ? `<p class="telemetry-note">Budget: ${esc(t2.budget.model_calls)} model call(s), ${esc(t2.budget.input_tokens)} in / ${esc(t2.budget.output_tokens)} out tokens, ${orUnmeasured(t2.budget.wall_seconds, (v) => v.toFixed(1) + "s")}.</p>` : ""}
+        </div>`;
     }
 
     if (traces.step_3_codegen) {
@@ -249,42 +326,222 @@ document.addEventListener("DOMContentLoaded", () => {
       html += `
         <div class="telemetry-step-card">
           <div class="telemetry-header">
-            <div class="telemetry-title"><span>⚙️</span><span>Step 3: JIT In-Transit Codegen & Calldata Assembly</span></div>
-            <span class="telemetry-tag tag-blue">Ephemerally Synthesized</span>
+            <div class="telemetry-title"><span>⚙️</span><span>Step 3: Calldata Synthesis</span></div>
+            <span class="telemetry-tag tag-blue">Encoded</span>
           </div>
           <div class="telemetry-grid">
-            <div class="telemetry-item"><div class="telemetry-key">Calldata Selector</div><div class="telemetry-val">${t3.calldata_selector}</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Payload Length</div><div class="telemetry-val">${t3.calldata_length_bytes} bytes</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Selector</div><div class="telemetry-val">${esc(t3.calldata_selector)}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Payload Length</div><div class="telemetry-val">${esc(t3.calldata_length_bytes)} bytes</div></div>
           </div>
-          <div style="margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">Ephemeral Python Script:</div>
-          <pre class="code-box">${t3.ephemeral_python_script}</pre>
-        </div>
-      `;
+          ${t3.ephemeral_python_script ? `<div class="telemetry-subhead">Ephemeral script (generated, never executed server-side):</div><pre class="code-box">${esc(t3.ephemeral_python_script)}</pre>` : ""}
+        </div>`;
     }
 
     if (traces.step_4_simulation) {
       const t4 = traces.step_4_simulation;
+      const v = simVerdict(t4.simulation_status);
       html += `
         <div class="telemetry-step-card">
           <div class="telemetry-header">
             <div class="telemetry-title"><span>🧪</span><span>Step 4: Dry-Run Simulation (eth_call)</span></div>
-            <span class="telemetry-tag tag-green">✓ Zero Reverts (eth_call Passed)</span>
+            <span class="telemetry-tag ${v.tag}">${v.label}</span>
           </div>
           <div class="telemetry-grid">
-            <div class="telemetry-item"><div class="telemetry-key">Execution RPC Node</div><div class="telemetry-val">${t4.rpc_endpoint}</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Gas Units Used</div><div class="telemetry-val">${t4.gas_units} gas</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Estimated Gas Fee</div><div class="telemetry-val">$${t4.estimated_gas_usd.toFixed(4)} USD</div></div>
-            <div class="telemetry-item"><div class="telemetry-key">Circuit Breaker Safety</div><div class="telemetry-val" style="color: var(--accent-green);">SAFE_TO_EXECUTE</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Status</div><div class="telemetry-val">${esc(t4.simulation_status)}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Verified Chain ID</div><div class="telemetry-val">${orUnmeasured(t4.verified_chain_id)}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">RPC Node</div><div class="telemetry-val">${orUnmeasured(t4.rpc_endpoint)}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Gas Units</div><div class="telemetry-val">${orUnmeasured(t4.gas_units)}</div></div>
+            <div class="telemetry-item"><div class="telemetry-key">Estimated Gas</div><div class="telemetry-val">${orUnmeasured(t4.estimated_gas_usd, (n) => "$" + Number(n).toFixed(4) + " USD")}</div></div>
           </div>
-        </div>
-      `;
+          <p class="telemetry-note">${v.note}</p>
+          ${t4.revert_reason ? `<pre class="code-box code-error">${esc(t4.revert_reason)}</pre>` : ""}
+        </div>`;
+    }
+
+    if (traces.step_error) {
+      const te = traces.step_error;
+      html += `
+        <div class="telemetry-step-card">
+          <div class="telemetry-header">
+            <div class="telemetry-title"><span>🩺</span><span>Diagnostic</span></div>
+            <span class="telemetry-tag ${te.will_retry ? "tag-amber" : "tag-rose"}">${te.will_retry ? "Retrying discovery" : "Run ended"}</span>
+          </div>
+          <div class="telemetry-grid">
+            <div class="telemetry-item"><div class="telemetry-key">Attempts</div><div class="telemetry-val">${esc(te.retry_count ?? 0)}</div></div>
+            ${te.demoted_skill ? `<div class="telemetry-item"><div class="telemetry-key">Skill Demoted</div><div class="telemetry-val">${esc(te.demoted_skill)}</div></div>` : ""}
+          </div>
+          ${te.error ? `<pre class="code-box code-error">${esc(te.error)}</pre>` : ""}
+          ${te.demoted_skill ? `<p class="telemetry-note">The cached route failed verification, so it is no longer served. It is retained on disk — a failure demotes a skill, it never rewrites one.</p>` : ""}
+        </div>`;
     }
 
     html += `</div>`;
     return html;
   }
 
-  // Execute Bridge Intent & Run Live Simulation
+  function renderProvenance(prov, proposal) {
+    if (prov.skipped) {
+      return `<p class="telemetry-note">⚠ On-chain provenance not checked: ${esc(prov.skipped)}.</p>`;
+    }
+    const checks = [
+      ["Router holds bytecode", prov.has_code],
+      ["Bytecode implements the claimed selector", prov.selector_present],
+      ["Sources corroborate", prov.sources_ok],
+    ];
+    return `
+      <div class="provenance">
+        <div class="telemetry-subhead">Provenance checks</div>
+        ${checks.map(([label, ok]) => `
+          <div class="provenance-row">
+            <span class="${ok ? "ok" : "bad"}">${ok ? "✓" : "✗"}</span>
+            <span>${esc(label)}</span>
+          </div>`).join("")}
+        ${prov.implementation_address ? `<p class="telemetry-note">Resolved through EIP-1967 proxy to <code>${esc(prov.implementation_address)}</code>.</p>` : ""}
+        ${proposal && proposal.sources && proposal.sources.length ? `<p class="telemetry-note">Sources: ${proposal.sources.map((u) => `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(u)}</a>`).join(", ")}</p>` : ""}
+      </div>`;
+  }
+
+  // ------------------------------------------------------- terminal outcomes
+
+  function renderNoRoute(data) {
+    return `
+      <div class="verdict verdict-amber">
+        <h3>No route found</h3>
+        <p>${esc(data.error || "No verified route covers this transfer.")}</p>
+        <p class="subtitle">
+          This is an answer, not a crash. Nothing was fabricated and nothing was sent.
+          A route the system has not verified is a route it does not have — set
+          <code>ANTHROPIC_API_KEY</code> so the agent can discover one, or run a pair
+          that already has a verified skill.
+        </p>
+      </div>
+      ${renderTelemetryCards(data.traces, data)}`;
+  }
+
+  function renderFailure(data) {
+    const status = data.verification && data.verification.simulation_status;
+    const v = simVerdict(status);
+    return `
+      <div class="verdict verdict-rose">
+        <h3>Not verified — refusing to proceed</h3>
+        <p>${esc(data.error || v.note)}</p>
+        <p class="subtitle">
+          The circuit breaker held. No transaction was offered for signature.
+        </p>
+      </div>
+      ${renderTelemetryCards(data.traces, data)}`;
+  }
+
+  // ------------------------------------------------------------ approval gate
+
+  function renderAmountCheck(amount) {
+    if (!amount) return "";
+    const token = esc(amount.token);
+
+    if (amount.decoded_from_calldata === null || amount.decoded_from_calldata === undefined) {
+      return `
+        <div class="amount-check amount-warn">
+          <div class="amount-label">Amount being sent</div>
+          <div class="amount-value">${esc(amount.requested)} ${token}</div>
+          <p class="amount-note">
+            ⚠ This is the figure you asked for. The calldata is not ABI-decodable, so it
+            could not be confirmed against the bytes you are about to sign.
+          </p>
+        </div>`;
+    }
+
+    if (!amount.matches) {
+      return `
+        <div class="amount-check amount-bad">
+          <div class="amount-label">⛔ Amount mismatch — do not approve</div>
+          <div class="amount-value">${esc(amount.decoded_from_calldata)} ${token}</div>
+          <p class="amount-note">
+            This is what the transaction actually moves, decoded from the calldata.
+            You asked for ${esc(amount.requested)} ${token}.
+          </p>
+        </div>`;
+    }
+
+    return `
+      <div class="amount-check amount-ok">
+        <div class="amount-label">Amount being sent</div>
+        <div class="amount-value">${esc(amount.decoded_from_calldata)} ${token}</div>
+        <p class="amount-note">✓ Decoded from the calldata you are signing, and it matches your request.</p>
+      </div>`;
+  }
+
+  function renderApproval(data) {
+    const v = simVerdict(data.verification && data.verification.simulation_status);
+    const route = data.route || {};
+    const amount = data.amount || {};
+    // A mismatch is the one condition where signing must not be one click away.
+    const blocked = amount.matches === false;
+
+    return `
+      <div class="manifest-card">
+        <div class="manifest-head">
+          <h3>Step 5: Human Approval</h3>
+          <span class="telemetry-tag ${v.tag}">${v.label}</span>
+        </div>
+
+        ${renderAmountCheck(amount)}
+
+        <div class="manifest-grid">
+          <div class="manifest-item"><div class="manifest-label">Route</div><div class="manifest-val">${esc(route.source)} ➔ ${esc(route.target)}</div></div>
+          <div class="manifest-item"><div class="manifest-label">Protocol</div><div class="manifest-val">${esc(route.bridge)}</div></div>
+          <div class="manifest-item"><div class="manifest-label">Router (you are calling this)</div><div class="manifest-val mono">${esc(route.router_address)}</div></div>
+          <div class="manifest-item"><div class="manifest-label">Function</div><div class="manifest-val mono">${esc(route.function_signature) || '<span class="muted">unknown</span>'}</div></div>
+          <div class="manifest-item"><div class="manifest-label">Verified on chain</div><div class="manifest-val">${orUnmeasured(data.verification && data.verification.simulated_on_chain_id)}</div></div>
+          <div class="manifest-item"><div class="manifest-label">Estimated gas</div><div class="manifest-val">${orUnmeasured(data.estimated_gas_usd, (n) => "$" + Number(n).toFixed(4) + " USD")}</div></div>
+        </div>
+
+        <p class="scope-note">${esc((data.verification && data.verification.scope) || v.note)}</p>
+        ${data.replayed_skill ? `<p class="scope-note">Replayed from cached skill <code>${esc(data.replayed_skill)}</code>. It was re-simulated for this request — a skill is a shortcut past discovery, not past the guardrails.</p>` : ""}
+
+        <div class="manifest-actions">
+          <button id="confirm-sign-btn" class="btn ${blocked ? "btn-danger" : "btn-success"}" ${blocked ? "disabled" : ""}>
+            <span>${blocked ? "Blocked — amount does not match" : "Sign in Wallet & Broadcast"}</span>
+            <span>${blocked ? "⛔" : "🚀"}</span>
+          </button>
+          <button id="cancel-btn" class="btn btn-secondary">Reject</button>
+        </div>
+
+        <details class="raw-calldata">
+          <summary>Raw calldata (${((data.unsigned_transaction_hex || "").length - 2) / 2} bytes)</summary>
+          <pre class="code-box">${esc(data.unsigned_transaction_hex)}</pre>
+        </details>
+
+        <h4 class="telemetry-heading">Execution traces</h4>
+        ${renderTelemetryCards(data.traces, data)}
+      </div>`;
+  }
+
+  // Drive the pipeline from what the graph actually recorded, not from a timer. The
+  // steps used to light up on setTimeout at 300/700/1200ms, so a run that failed at
+  // discovery still showed simulation as completed.
+  function syncPipeline(data) {
+    resetPipeline();
+    const t = data.traces || {};
+    const reached = [
+      t.step_1_intent,
+      t.step_2_discovery,
+      t.step_3_codegen,
+      t.step_4_simulation,
+      data.status === "AWAITING_USER_APPROVAL" || t.step_6_broadcast,
+      t.step_6_broadcast,
+    ];
+    const lastDone = reached.lastIndexOf(reached.filter(Boolean).pop());
+    reached.forEach((done, i) => {
+      if (!done) return;
+      steps[i].classList.add(i === lastDone ? "active" : "completed");
+    });
+  }
+
+  // ---------------------------------------------------------------- submit
+
+  let currentAmount = null;
+  let currentSourceChainId = null;
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const query = intentInput.value.trim();
@@ -294,113 +551,99 @@ document.addEventListener("DOMContentLoaded", () => {
     setStepActive(1);
     outputSection.classList.remove("hidden");
     outputSection.innerHTML = `
-      <div style="text-align: center; padding: 2rem 1rem;">
-        <div style="font-size: 1.4rem; margin-bottom: 0.5rem;">🤖 Step-by-Step Discovery & Simulation in Progress...</div>
-        <p class="subtitle">Executing NLP parsing ➔ web search ➔ JIT codegen ➔ eth_call dry-run...</p>
-      </div>
-    `;
+      <div class="working">
+        <div class="working-title">Resolving route…</div>
+        <p class="subtitle">Parsing intent, resolving the chain, discovering or replaying a route, encoding calldata, then simulating against a live node.</p>
+      </div>`;
 
     executeBtn.disabled = true;
 
     try {
-      setTimeout(() => setStepActive(2), 300);
-      setTimeout(() => setStepActive(3), 700);
-      setTimeout(() => setStepActive(4), 1200);
+      // The wallet is required. It used to be omitted and defaulted server-side to a
+      // hardcoded mainnet address, so an unconnected user got a simulation against a
+      // stranger's balances — which tells them nothing about their own transfer.
+      if (!userConnectedAddress) {
+        const connected = await triggerBlocknativeConnect();
+        if (!connected) {
+          outputSection.innerHTML = `
+            <div class="verdict verdict-amber">
+              <h3>Connect a wallet first</h3>
+              <p>Simulation runs from your address: balances and allowances are what
+                 determine whether this transfer would succeed. Running it from anyone
+                 else's account would not describe your transaction.</p>
+            </div>`;
+          resetPipeline();
+          return;
+        }
+      }
 
       const response = await fetch("/api/bridge/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          input: query,
-          userAddress: userConnectedAddress || "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-        }),
+        body: JSON.stringify({ input: query, userAddress: userConnectedAddress }),
       });
 
       const data = await response.json();
-      setStepActive(5);
+      syncPipeline(data);
 
-      // Detailed Browser Console Logging of Search and Extraction
-      console.group("🌉 Omnibridge Step-by-Step Execution Telemetry");
-      console.log("🧠 Step 1 - Parsed Intent:", data.traces?.step_1_intent?.parsed_parameters);
-      console.log("🔍 Step 2 - Web Search Query:", data.traces?.step_2_discovery?.search_query);
-      console.log("🌐 Step 2 - Web Search Tool Output:", data.traces?.step_2_discovery?.web_search_tool_output);
-      console.log("📋 Step 2 - Extracted Parameters to Use:", {
-        protocol: data.route?.bridge,
-        router_contract: data.route?.router_address,
-        active_rpc: data.traces?.step_2_discovery?.active_rpc,
-        source_chain: data.route?.source,
-        dest_chain: data.route?.target,
-      });
-      console.log("⚙️ Step 3 - Synthesized Calldata Hex:", data.unsigned_transaction_hex);
-      console.log("🧪 Step 4 - Simulation & Gas Profile:", data.traces?.step_4_simulation);
+      console.groupCollapsed("🌉 Omnibridge execution telemetry");
+      console.log("status:", data.status);
+      console.log("route:", data.route);
+      console.log("verification:", data.verification);
+      console.log("agent evidence:", data.agent_evidence);
+      console.log("budget:", data.budget);
+      console.log("traces:", data.traces);
       console.groupEnd();
 
       if (data.status === "AWAITING_USER_APPROVAL") {
         currentThreadId = data.thread_id;
         currentUnsignedHex = data.unsigned_transaction_hex;
         currentRouterAddress = data.route.router_address;
+        currentSourceChainId = data.route.source_chain_id;
+        currentAmount = data.amount;
 
-        const telemetryHtml = renderTelemetryCards(data.traces);
-
-        outputSection.innerHTML = `
-          <div class="manifest-card">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-              <h3 style="color: var(--accent-cyan);">⚡ Step 5: Human-in-the-Loop Approval Manifest</h3>
-              <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.3);">
-                ✓ Pre-Flight Simulation Passed
-              </span>
-            </div>
-            <p class="subtitle">Simulation verified this transaction will not revert. Click below to sign with your connected wallet.</p>
-
-            <div class="manifest-actions" style="margin-bottom: 1.5rem;">
-              <button id="confirm-sign-btn" class="btn btn-success" style="font-size: 1.05rem; padding: 1rem 2rem;">
-                <span>Sign in Wallet & Broadcast Live</span>
-                <span>🚀</span>
-              </button>
-              <button id="cancel-btn" class="btn btn-secondary">Reject</button>
-            </div>
-
-            <h4 style="margin-top: 1.5rem; color: var(--text-secondary); font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em;">
-              📋 Telemetry & Execution Traces (Step 1 – Step 4)
-            </h4>
-            ${telemetryHtml}
-          </div>
-        `;
-
+        outputSection.innerHTML = renderApproval(data);
         document.getElementById("confirm-sign-btn").addEventListener("click", handleBlocknativeSignAndBroadcast);
         document.getElementById("cancel-btn").addEventListener("click", () => {
-          outputSection.innerHTML = `<p style="color: var(--accent-amber);">Transaction rejected by user. Nothing was broadcasted on-chain.</p>`;
+          outputSection.innerHTML = `<div class="verdict verdict-amber"><h3>Rejected</h3><p>Nothing was signed and nothing was broadcast.</p></div>`;
           resetPipeline();
         });
+      } else if (data.status === "NO_ROUTE_FOUND") {
+        outputSection.innerHTML = renderNoRoute(data);
       } else {
-        outputSection.innerHTML = `
-          <div style="color: var(--accent-rose);">
-            <h3>Simulation / Execution Error</h3>
-            <p>${data.error || "Simulation failed to pass zero-revert guarantee."}</p>
-          </div>
-        `;
+        outputSection.innerHTML = renderFailure(data);
       }
+
+      // A failed run may have retired a cached skill; the library should reflect it.
+      if (data.demoted_skill) loadSkills();
     } catch (err) {
-      outputSection.innerHTML = `<p style="color: var(--accent-rose);">Failed to execute intent: ${err.message}</p>`;
+      outputSection.innerHTML = `<div class="verdict verdict-rose"><h3>Request failed</h3><p>${esc(err.message)}</p></div>`;
     } finally {
       executeBtn.disabled = false;
     }
   });
 
-  // Step 6: Real Web3 Wallet Signing & On-Chain Broadcast via Blocknative Provider
+  // -------------------------------------------------- step 6: sign & broadcast
+
   async function handleBlocknativeSignAndBroadcast() {
     const signBtn = document.getElementById("confirm-sign-btn");
-    let connectedWallets = onboard.state.get().wallets;
 
-    // If wallet not connected yet, trigger Blocknative modal
+    // Defence in depth: the button is disabled on a mismatch, but a disabled button is
+    // a UI state, not a guarantee. Nothing reaches a wallet without this check passing.
+    if (currentAmount && currentAmount.matches === false) {
+      outputSection.insertAdjacentHTML("afterbegin",
+        `<div class="banner banner-rose"><strong>Blocked:</strong> the calldata moves
+         ${esc(currentAmount.decoded_from_calldata)} ${esc(currentAmount.token)}, not the
+         ${esc(currentAmount.requested)} ${esc(currentAmount.token)} you asked for.</div>`);
+      return;
+    }
+
+    let connectedWallets = onboard.state.get().wallets;
     if (!connectedWallets || connectedWallets.length === 0) {
       connectedWallets = await onboard.connectWallet();
       if (!connectedWallets || connectedWallets.length === 0) {
-        outputSection.insertAdjacentHTML("afterbegin", `
-          <div style="background: rgba(245, 158, 11, 0.15); border: 1px solid var(--accent-amber); border-radius: var(--radius-md); padding: 1rem; margin-bottom: 1.5rem; color: #fde68a;">
-            <strong>⚠️ Wallet Connection Required:</strong> Please connect your wallet in the Blocknative modal to authorize this transaction.
-          </div>
-        `);
+        outputSection.insertAdjacentHTML("afterbegin",
+          `<div class="banner banner-amber"><strong>Wallet required:</strong> connect a wallet to authorise this transaction.</div>`);
         return;
       }
     }
@@ -410,81 +653,84 @@ document.addEventListener("DOMContentLoaded", () => {
     const provider = primaryWallet.provider;
 
     signBtn.disabled = true;
-    signBtn.innerHTML = `<span>Awaiting signature in ${primaryWallet.label || "Wallet"}...</span>`;
+    signBtn.innerHTML = `<span>Awaiting signature in ${esc(primaryWallet.label || "your wallet")}…</span>`;
     setStepActive(6);
 
     let realTxHash = null;
-
     try {
       realTxHash = await provider.request({
         method: "eth_sendTransaction",
-        params: [
-          {
-            from: fromAddress,
-            to: currentRouterAddress,
-            data: currentUnsignedHex,
-            value: "0x0",
-          },
-        ],
+        params: [{ from: fromAddress, to: currentRouterAddress, data: currentUnsignedHex, value: "0x0" }],
       });
     } catch (walletErr) {
       signBtn.disabled = false;
-      signBtn.innerHTML = `<span>Sign in Wallet & Broadcast Live 🚀</span>`;
+      signBtn.innerHTML = `<span>Sign in Wallet & Broadcast</span><span>🚀</span>`;
       setStepActive(5);
-
-      outputSection.insertAdjacentHTML("afterbegin", `
-        <div style="background: rgba(244, 63, 94, 0.15); border: 1px solid var(--accent-rose); border-radius: var(--radius-md); padding: 1rem; margin-bottom: 1.5rem; color: #fecdd3;">
-          <strong>⚠️ Signature Rejected in Wallet:</strong> ${walletErr.message || "Transaction was cancelled in your wallet. Nothing broadcasted."}
-        </div>
-      `);
+      outputSection.insertAdjacentHTML("afterbegin",
+        `<div class="banner banner-rose"><strong>Not signed:</strong> ${esc(walletErr.message || "cancelled in wallet")}. Nothing was broadcast.</div>`);
       return;
     }
 
-    // Resume LangGraph with real on-chain transaction hash
     try {
-      signBtn.innerHTML = `<span>Confirming on-chain & saving SKILL.md...</span>`;
+      signBtn.innerHTML = `<span>Recording broadcast and saving SKILL.md…</span>`;
 
       const resp = await fetch("/api/bridge/resume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          thread_id: currentThreadId,
-          signed_transaction_hex: realTxHash,
-        }),
+        body: JSON.stringify({ thread_id: currentThreadId, signed_transaction_hex: realTxHash }),
       });
 
+      // The old handler rendered "Broadcast Confirmed On-Chain!" unconditionally,
+      // including when the server had refused the resume. Report what came back.
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail.detail || `server returned ${resp.status}`);
+      }
+
       const resData = await resp.json();
+
+      if (resData.status !== "CONFIRMED") {
+        outputSection.innerHTML = `
+          <div class="verdict verdict-rose">
+            <h3>Broadcast not recorded — status ${esc(resData.status)}</h3>
+            <p>${esc(resData.error || "The graph did not reach the broadcast node.")}</p>
+            <p class="subtitle">Your wallet reported transaction <code>${esc(realTxHash)}</code>. Check it on-chain before retrying — it may already be in flight.</p>
+          </div>
+          ${renderTelemetryCards(resData.traces, resData)}`;
+        return;
+      }
+
       setAllCompleted();
+      const url = resData.explorer_url || explorerTxUrl(currentSourceChainId, realTxHash);
 
       outputSection.innerHTML = `
         <div class="success-box">
-          <div class="success-header">
-            <span>✓ Real Transaction Broadcast Confirmed On-Chain!</span>
-          </div>
-          <p style="margin-bottom: 0.75rem;">Your real cross-chain transaction has been broadcast to the network sequencer.</p>
-          
+          <div class="success-header"><span>✓ Broadcast submitted</span></div>
+          <p>Submitted to the source chain. Cross-chain delivery is not confirmed by this
+             step — the destination leg settles on the bridge's own schedule.</p>
           <div class="manifest-grid">
             <div class="manifest-item">
-              <div class="manifest-label">On-Chain Transaction Hash</div>
-              <div class="manifest-val" style="font-size: 0.85rem; color: var(--accent-green); word-break: break-all;">
-                <a href="https://basescan.org/tx/${realTxHash}" target="_blank" style="color: var(--accent-green); text-decoration: underline;">
-                  ${realTxHash} ↗
-                </a>
+              <div class="manifest-label">Transaction hash</div>
+              <div class="manifest-val mono">
+                ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(realTxHash)} ↗</a>` : esc(realTxHash)}
               </div>
             </div>
             <div class="manifest-item">
-              <div class="manifest-label">Persistent SKILL.md Saved</div>
-              <div class="manifest-val" style="font-size: 0.8rem; color: #a5b4fc;">
-                ${resData.skill_persisted}
-              </div>
+              <div class="manifest-label">Skill persisted</div>
+              <div class="manifest-val mono">${esc(resData.skill_persisted) || '<span class="muted">none written</span>'}</div>
             </div>
           </div>
         </div>
-      `;
+        ${renderTelemetryCards(resData.traces, resData)}`;
 
       loadSkills();
     } catch (err) {
-      outputSection.innerHTML = `<p style="color: var(--accent-rose);">Error recording broadcast: ${err.message}</p>`;
+      outputSection.innerHTML = `
+        <div class="verdict verdict-rose">
+          <h3>Could not record the broadcast</h3>
+          <p>${esc(err.message)}</p>
+          <p class="subtitle">Your wallet reported <code>${esc(realTxHash)}</code>. The transaction may be on-chain even though the server did not record it — verify before retrying.</p>
+        </div>`;
     }
   }
 });

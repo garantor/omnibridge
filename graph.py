@@ -569,6 +569,18 @@ def validate_resume_payload(resume_data: Any, unsigned_hex: Optional[str]) -> st
 
 # --- NODE 5: Human-in-the-Loop Interrupt Gate ---
 def hitl_gate_node(state: GraphState) -> Dict[str, Any]:
+    quote_data = (state.get("route") or {}).get("quote_obj") or {}
+    calldata = state["unsigned_transaction_hex"]
+    sim = state.get("simulation_result") or {}
+
+    # Recover the amount from the bytes that will actually be signed. The CLI manifest
+    # has done this since Phase 1; the browser path never did, so the only number a web
+    # user ever saw was the one they typed. If the display and the transaction read from
+    # the same source, a scaling error is invisible to the human too.
+    decimals = quote_data.get("decimals") or 6
+    decoded_raw = CalldataExecutor.decode_leading_uint256(calldata)
+    decoded_amount = decoded_raw / (10 ** decimals) if decoded_raw is not None else None
+
     approval_payload = {
         "status": "AWAITING_USER_APPROVAL",
         "route": {
@@ -576,10 +588,40 @@ def hitl_gate_node(state: GraphState) -> Dict[str, Any]:
             "target": state["target_chain"],
             "bridge": state["route"]["bridge"],
             "router_address": state["route"]["router_address"],
+            "source_chain_id": quote_data.get("source_chain_id"),
+            "dest_chain_ref": (quote_data.get("extra_params") or {}).get("dest_chain_ref"),
+            "function_signature": (quote_data.get("extra_params") or {}).get("function_signature"),
         },
-        "unsigned_transaction_hex": state["unsigned_transaction_hex"],
+        # What the human is actually authorising, and whether it matches what they asked
+        # for. `decoded` is None when the calldata is not ABI-decodable — stated as
+        # unverified rather than silently falling back to the requested figure.
+        "amount": {
+            "requested": state["amount"],
+            "decoded_from_calldata": decoded_amount,
+            "token": state["asset"],
+            "matches": (
+                decoded_amount is not None
+                and abs(decoded_amount - float(state["amount"])) < 1e-9
+            ),
+        },
+        # The scope of what was checked, so the page cannot imply more than happened.
+        "verification": {
+            "simulation_status": sim.get("status"),
+            "simulated_on_chain_id": sim.get("simulated_on_chain_id"),
+            "simulated_via_rpc": sim.get("simulated_via_rpc"),
+            "gas_used": sim.get("gas_used"),
+            "revert_reason": sim.get("revert_reason"),
+            "scope": (
+                "Source leg only. No eth_call can prove that funds arrive on the "
+                "destination chain."
+            ),
+        },
+        "unsigned_transaction_hex": calldata,
         "estimated_gas_usd": state["estimated_gas_usd"],
         "slippage": state["slippage"],
+        "agent_evidence": state.get("agent_evidence"),
+        "budget": state.get("budget"),
+        "replayed_skill": state.get("replayed_skill"),
         "traces": state.get("traces", {}),
     }
 
@@ -762,6 +804,20 @@ def error_node(state: GraphState) -> Dict[str, Any]:
     # recorded. The demotion happens on the pass that saw the failure; by the time the
     # retry comes back through, the skill is already unverified and `demoted` is None.
     previous = traces.get("step_error") or {}
+
+    # Report the failure that started this, not the one it caused. A reverted skill is
+    # demoted, so the retry finds an empty cache and reports "no verified skill covers
+    # this route" — true, but only because of the demotion, and it reads as though the
+    # route was never known. The first substantive attempt is the honest headline.
+    root_cause = next(
+        (a for a in previous.get("attempts", []) if a.get("simulation_status")), None
+    )
+    if root_cause and state.get("status") == "NO_ROUTE_FOUND":
+        reason = (
+            f"{root_cause['error']} "
+            f"(after this failed, the cached route was retired, so the retry found "
+            f"nothing left to try.)"
+        )
     traces["step_error"] = {
         "title": "Diagnostic",
         "error": reason,
@@ -777,7 +833,10 @@ def error_node(state: GraphState) -> Dict[str, Any]:
     }
 
     return {
-        "status": "ERROR",
+        # A no-route keeps its own name through the diagnostic. Flattening every
+        # outcome to ERROR forced callers to pattern-match the message to tell "no
+        # bridge exists for this pair" from "the bridge rejected this transaction".
+        "status": "NO_ROUTE_FOUND" if state.get("status") == "NO_ROUTE_FOUND" else "ERROR",
         "error": reason or "Unknown execution error occurred",
         "failure_context": failure_context,
         "retry_count": state.get("retry_count", 0) + (1 if failure_context else 0),

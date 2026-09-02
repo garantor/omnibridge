@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css?v=2.1">
+  <link rel="stylesheet" href="/static/style.css?v=3.0">
 </head>
 <body>
   <div class="app-container">
@@ -41,7 +41,7 @@
       <section class="prompt-section card">
         <div class="section-header">
           <h2>Type Your Cross-Chain Intent</h2>
-          <p class="subtitle">Describe what you want to bridge in plain English. No pre-configured bridge SDKs or hardcoded routers.</p>
+          <p class="subtitle">Describe what you want to bridge in plain English. Routes are replayed from verified skill memory or discovered at runtime — there are no hardcoded routers, and an unknown route is reported as unknown rather than guessed.</p>
         </div>
 
         <form id="bridge-form" class="intent-form">
@@ -64,7 +64,6 @@
           <div class="quick-templates">
             <span class="quick-label">Quick suggestions:</span>
             <button type="button" class="chip" data-intent="Bridge 50 USDC from Base to Solana">Base ➔ Solana (50 USDC)</button>
-            <button type="button" class="chip" data-intent="Bridge 100 USDC from Base to Hyperliquid">Base ➔ Hyperliquid (100 USDC)</button>
             <button type="button" class="chip" data-intent="Bridge 25 USDC from Base to Arbitrum">Base ➔ Arbitrum (25 USDC)</button>
             <button type="button" class="chip" data-intent="Bridge 10 USDC from Stellar to Arbitrum">Stellar ➔ Arbitrum (10 USDC)</button>
           </div>
@@ -87,7 +86,7 @@
             <div class="step-badge">2</div>
             <div class="step-info">
               <span class="step-title">Discovery</span>
-              <span class="step-detail">Skill / Web Docs</span>
+              <span class="step-detail">Skill Cache / Agent</span>
             </div>
           </div>
           <div class="pipeline-connector"></div>
@@ -95,7 +94,7 @@
             <div class="step-badge">3</div>
             <div class="step-info">
               <span class="step-title">JIT Codegen</span>
-              <span class="step-detail">Raw Hex Payload</span>
+              <span class="step-detail">ABI Encode + Verify</span>
             </div>
           </div>
           <div class="pipeline-connector"></div>
@@ -135,7 +134,7 @@
         <div class="section-header-flex">
           <div>
             <h3>Persistent SKILL.md Repository</h3>
-            <p class="subtitle">Learned, reusable cross-chain procedures persisted under open <code>agentskills.io</code> standard.</p>
+            <p class="subtitle">Routes that were discovered, simulated and approved once, kept so the next identical request skips discovery. A skill that fails verification is demoted, not overwritten, and stays listed so the demotion is reversible.</p>
           </div>
           <button id="refresh-skills-btn" class="btn btn-secondary">Refresh Skills</button>
         </div>
@@ -146,6 +145,6 @@
     </main>
   </div>
 
-  <script type="module" src="/static/app.js?v=3.0"></script>
+  <script type="module" src="/static/app.js?v=4.0"></script>
 </body>
 </html>

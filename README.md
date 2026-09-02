@@ -107,11 +107,13 @@ python server.py          # http://localhost:8000
 | `GET /` | Web UI |
 | `GET /health` | Liveness |
 | `GET /docs` | OpenAPI |
-| `POST /api/bridge/start` | Runs stages 1–5, returns the approval payload and a `thread_id` |
-| `POST /api/bridge/resume` | Resumes from the interrupt with a signed transaction |
-| `GET /api/skills` | Lists persisted `SKILL.md` modules |
+| `POST /api/bridge/start` | Runs stages 1–5. Returns the approval payload on success, or a terminal state with its traces. `userAddress` is required |
+| `POST /api/bridge/resume` | Resumes from the interrupt with a signed transaction. Reports `CONFIRMED` or `REJECTED` — never a status the graph did not reach |
+| `GET /api/skills` | Lists persisted `SKILL.md` modules, including demoted ones, with their verification state |
 
-The UI offers Base → Solana, Base → Hyperliquid, Base → Arbitrum and Stellar → Arbitrum as starting prompts.
+The approval screen shows the amount **decoded from the calldata being signed**, not the figure typed into the box, and disables signing when the two disagree. The simulation verdict, the on-chain provenance checks and the source citations are rendered from the response — nothing on the page is a fixed string.
+
+A wallet must be connected before a run starts: simulation runs from the caller's address, and running it from any other account would not describe their transfer.
 
 ### CLI
 

@@ -586,3 +586,155 @@ body {
   border-top: 1px solid var(--border-color);
   padding-top: 0.5rem;
 }
+
+/* ---------------------------------------------------------------------------
+   Verdict, provenance and amount-check styling.
+
+   The page previously rendered a green "Zero Reverts" tag and a hardcoded
+   "SAFE_TO_EXECUTE" regardless of what the simulator returned. These classes
+   exist so a verdict can be rendered in whatever colour the outcome warrants,
+   including the amber that means "could not check" — a state the old palette
+   had no way to express.
+   --------------------------------------------------------------------------- */
+
+.muted { color: var(--text-muted); font-style: italic; }
+.mono { font-family: "JetBrains Mono", monospace; word-break: break-all; }
+
+.telemetry-tag.tag-rose  { background: rgba(244, 63, 94, 0.15);  color: #fda4af; border: 1px solid rgba(244, 63, 94, 0.35); }
+.telemetry-tag.tag-amber { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.35); }
+
+.telemetry-note {
+  margin-top: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.telemetry-subhead {
+  margin-top: 0.85rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.telemetry-heading {
+  margin-top: 1.75rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.code-box.code-error { color: #fda4af; }
+
+/* Provenance checks */
+.provenance { margin-top: 0.85rem; }
+.provenance-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  font-size: 0.82rem;
+  padding: 0.2rem 0;
+}
+.provenance-row .ok  { color: var(--accent-green); font-weight: 700; }
+.provenance-row .bad { color: var(--accent-rose);  font-weight: 700; }
+
+/* The amount actually being sent — decoded from the calldata, not echoed back */
+.amount-check {
+  border-radius: var(--radius-md);
+  padding: 1.1rem 1.25rem;
+  margin: 1.25rem 0;
+  border: 1px solid;
+}
+.amount-check .amount-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.85;
+}
+.amount-check .amount-value {
+  font-size: 1.65rem;
+  font-weight: 700;
+  font-family: "JetBrains Mono", monospace;
+  margin: 0.35rem 0;
+}
+.amount-check .amount-note { font-size: 0.8rem; line-height: 1.5; opacity: 0.9; margin: 0; }
+
+.amount-ok   { background: rgba(16, 185, 129, 0.10); border-color: rgba(16, 185, 129, 0.35); color: #6ee7b7; }
+.amount-warn { background: rgba(245, 158, 11, 0.10); border-color: rgba(245, 158, 11, 0.35); color: #fcd34d; }
+.amount-bad  { background: rgba(244, 63, 94, 0.12);  border-color: var(--accent-rose);       color: #fecdd3; }
+
+/* Terminal verdicts */
+.verdict { border-radius: var(--radius-md); padding: 1.5rem; border: 1px solid; }
+.verdict h3 { margin: 0 0 0.6rem; font-size: 1.15rem; }
+.verdict p  { margin: 0 0 0.6rem; line-height: 1.6; }
+.verdict code {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.85em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.18);
+}
+.verdict-amber { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.35); color: #fcd34d; }
+.verdict-rose  { background: rgba(244, 63, 94, 0.08);  border-color: rgba(244, 63, 94, 0.35);  color: #fecdd3; }
+
+.banner {
+  border-radius: var(--radius-md);
+  padding: 1rem;
+  margin-bottom: 1.25rem;
+  border: 1px solid;
+  line-height: 1.5;
+}
+.banner-amber { background: rgba(245, 158, 11, 0.15); border-color: var(--accent-amber); color: #fde68a; }
+.banner-rose  { background: rgba(244, 63, 94, 0.15);  border-color: var(--accent-rose);  color: #fecdd3; }
+
+.manifest-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.manifest-head h3 { margin: 0; color: var(--accent-cyan); }
+.scope-note { font-size: 0.8rem; color: var(--text-muted); line-height: 1.55; margin: 0.5rem 0; }
+.scope-note code { font-family: "JetBrains Mono", monospace; font-size: 0.9em; }
+
+.raw-calldata { margin-top: 1.25rem; }
+.raw-calldata summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.btn-danger {
+  background: rgba(244, 63, 94, 0.15);
+  border: 1px solid var(--accent-rose);
+  color: #fecdd3;
+}
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.working { text-align: center; padding: 2rem 1rem; }
+.working-title { font-size: 1.25rem; margin-bottom: 0.5rem; }
+
+/* Skills library */
+.skill-card.skill-demoted { opacity: 0.72; border-color: rgba(245, 158, 11, 0.4); }
+.skill-name { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; }
+.skill-badge {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.skill-badge.ok  { background: rgba(16, 185, 129, 0.15); color: #6ee7b7; }
+.skill-badge.bad { background: rgba(245, 158, 11, 0.15); color: #fcd34d; }
+.skill-failure {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: #fcd34d;
+  line-height: 1.45;
+  word-break: break-word;
+}
