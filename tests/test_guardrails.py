@@ -280,3 +280,20 @@ def test_recipient_of_an_impossible_width_is_refused():
     with pytest.raises(ValueError) as excinfo:
         CalldataExecutor.pad_bytes32_address("0x" + "ab" * 27)
     assert "Refusing to hash or truncate" in str(excinfo.value)
+
+
+# ------------------------------------------------------------------- CLI surface
+
+@pytest.mark.parametrize("subcommand", ["bridge", "list-skills", "rpc-bench"])
+def test_every_cli_subcommand_can_print_its_help(subcommand, capsys):
+    """
+    `bridge --help` crashed: a literal `%` in the slippage help text was read as an
+    argparse interpolation. Cheap to reintroduce, and it makes the command look broken
+    before it has done anything.
+    """
+    from omnibridge.cli import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main([subcommand, "--help"])
+    assert excinfo.value.code == 0
+    assert "usage:" in capsys.readouterr().out

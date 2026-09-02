@@ -78,7 +78,7 @@ def handle_rpc_bench(args):
     console.print(f"[bold green]✓ Fastest RPC endpoint:[/bold green] {fastest}")
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Omnibridge: Autonomous In-Transit Cross-Chain Agent")
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
@@ -92,7 +92,7 @@ def main():
     # Required: simulating from anyone else's account reports their balances and
     # allowances, which says nothing about this transfer.
     bridge_parser.add_argument("--sender", "-s", required=True, help="Your sender address")
-    bridge_parser.add_argument("--slippage-bps", type=int, default=50, help="Max slippage in basis points (50 = 0.5%)")
+    bridge_parser.add_argument("--slippage-bps", type=int, default=50, help="Max slippage in basis points (50 = 0.5%%)")
     bridge_parser.add_argument("--yes", "-y", action="store_true", help="Auto-approve without interactive prompt (for tests/automation)")
     bridge_parser.add_argument("--dry-run", action="store_true", help="Rehearse without broadcasting; never inferred from a missing key")
 
@@ -103,7 +103,7 @@ def main():
     rpc_parser = subparsers.add_parser("rpc-bench", help="Benchmark and race public RPC endpoints")
     rpc_parser.add_argument("chain", help="Chain name to test (e.g. base, arbitrum, ethereum)")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.command == "bridge":
         handle_bridge(args)
