@@ -21,6 +21,7 @@ from omnibridge.core.executor import CalldataExecutor
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
 
+
 def _load(name):
     path = GOLDEN_DIR / name
     return json.loads(path.read_text()) if path.exists() else []
@@ -195,3 +196,101 @@ def test_agent_derives_the_golden_route_from_intent_alone():
         UserIntent(token="USDC", amount=1.0, source_chain="base", dest_chain="arbitrum")
     )
     assert quote.router_address.lower() == fx["router_address"].lower()
+
+
+# ---------------------------------------------------- Phase 4: one encoding path
+
+def test_build_calldata_refuses_a_route_that_names_no_function():
+    """
+    The deleted fall-through invented `bridge(uint256,address,uint256)` — a signature
+    that exists on no protocol — for any route it did not recognise. It always produced
+    well-formed calldata for a call that could not succeed, so the failure surfaced as
+    an opaque revert rather than as the guess it was.
+    """
+    from omnibridge.core.models import RouteQuote, UserIntent
+
+    quote = RouteQuote(
+        bridge_name="Something Unrecognised",
+        source_chain_id=8453,
+        dest_chain_id=42161,
+        source_token_address="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        dest_token_address="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        router_address="0x1682Ae6375C4E4A97e4B583BC394c861A46D8962",
+        deposit_amount_raw=1000000,
+        estimated_output_raw=1000000,
+        decimals=6,
+        fee_amount_usd=0.0,
+        gas_estimate_units=0,
+        calldata_template="generic",
+        extra_params={},
+    )
+    intent = UserIntent(token="USDC", amount=1.0, source_chain="base", dest_chain="arbitrum")
+
+    with pytest.raises(ValueError) as excinfo:
+        CalldataExecutor.build_calldata_for_route(quote, intent, "0x" + "11" * 20)
+    assert "is not a route" in str(excinfo.value)
+
+
+def test_the_fabricating_encoder_branches_are_gone(code_only):
+    """
+    `stellar_soroban_invoke` returned the UTF-8 bytes of the *string*
+    `stellar_invoke:deposit(100.0,G...)` as though that were a transaction payload.
+    Asserted as absence, because a refusal one line from being reinstated is not one.
+    """
+    import omnibridge.core.executor as ex
+
+    source = code_only(ex.__file__)
+    assert "stellar_invoke" not in source
+    assert "bridge(uint256,address,uint256)" not in source
+    # And the switch they hung off is gone with them.
+    assert "calldata_template ==" not in source
+
+
+@pytest.mark.parametrize("fx", CCTP, ids=CCTP_IDS)
+def test_a_stored_route_reproduces_real_calldata_through_build_calldata_for_route(fx):
+    """
+    Phase 4's replacement path, end to end, against real bytes: a route carrying only a
+    signature, its types and placeholder-bearing values encodes what the chain accepted.
+    """
+    from omnibridge.core.models import RouteQuote, UserIntent
+
+    recipient_b32 = bytes.fromhex(fx["param_values"][2][2:])
+    evm_shaped = recipient_b32[:12] == b"\x00" * 12
+    recipient = "0x" + (recipient_b32[12:] if evm_shaped else recipient_b32).hex()
+
+    stored = CalldataExecutor.generalise_param_values(
+        fx["param_values"],
+        amount_raw=int(fx["amount_raw"]),
+        recipient=recipient,
+        sender=recipient,
+    )
+
+    quote = RouteQuote(
+        bridge_name="Circle CCTP (Verified Skill)",
+        source_chain_id=fx["source_chain_id"],
+        dest_chain_id=fx["source_chain_id"],
+        source_token_address=fx["param_values"][3],
+        dest_token_address="",
+        router_address=fx["router_address"],
+        deposit_amount_raw=int(fx["amount_raw"]),
+        estimated_output_raw=int(fx["amount_raw"]),
+        decimals=fx["decimals"],
+        fee_amount_usd=0.0,
+        gas_estimate_units=0,
+        calldata_template="skill_verified",
+        extra_params={
+            "function_signature": fx["function_signature"],
+            "param_types": fx["param_types"],
+            "param_values": stored,
+        },
+    )
+    intent = UserIntent(
+        token=fx["token"],
+        amount=fx["amount_human"],
+        source_chain=fx["source_chain"],
+        dest_chain=fx["dest_chain"],
+        recipient=recipient,
+    )
+
+    encoded = CalldataExecutor.build_calldata_for_route(quote, intent, recipient)
+    assert encoded.lower() == fx["expected_calldata"].lower()

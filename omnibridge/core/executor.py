@@ -239,48 +239,113 @@ class CalldataExecutor:
         except (ValueError, TypeError):
             return None
 
+    # The only substitutions a stored route may ask for. Bounded and reviewed: the
+    # agent decided at discovery time which slot carries the amount and which the
+    # recipient; this code performs that binding and nothing else. An unrecognised
+    # placeholder is refused rather than passed through as a literal string.
+    PLACEHOLDERS = ("{amount_raw}", "{recipient}", "{recipient_bytes32}", "{sender}")
+
+    @classmethod
+    def bind_param_values(
+        cls,
+        param_values: List[Any],
+        amount_raw: int,
+        recipient: str,
+        sender: str,
+    ) -> List[Any]:
+        """Substitute this request's amount and addresses into a stored parameter list."""
+        bindings: Dict[str, Any] = {
+            "{amount_raw}": amount_raw,
+            "{recipient}": recipient,
+            "{recipient_bytes32}": "0x" + cls.pad_bytes32_address(recipient).hex(),
+            "{sender}": sender,
+        }
+
+        bound: List[Any] = []
+        for value in param_values:
+            if not isinstance(value, str) or "{" not in value:
+                bound.append(value)
+                continue
+            if value in bindings:
+                bound.append(bindings[value])
+                continue
+            raise ValueError(
+                f"Stored route contains the placeholder {value!r}, which this encoder "
+                f"does not know how to bind. Known placeholders: {', '.join(cls.PLACEHOLDERS)}. "
+                "Refusing to encode it as a literal."
+            )
+        return bound
+
+    @classmethod
+    def generalise_param_values(
+        cls,
+        param_values: List[Any],
+        amount_raw: int,
+        recipient: str,
+        sender: str,
+    ) -> List[str]:
+        """
+        The inverse: replace this run's concrete values with placeholders before storing.
+
+        Purely mechanical — a slot becomes a placeholder only when it is byte-identical
+        to the value that was bound into it. A skill that stored the literal amount
+        would replay one transfer forever, at whatever size happened to be verified first.
+        """
+        recipient_b32 = "0x" + cls.pad_bytes32_address(recipient).hex()
+        reverse = [
+            (str(amount_raw), "{amount_raw}"),
+            (str(recipient).lower(), "{recipient}"),
+            (recipient_b32.lower(), "{recipient_bytes32}"),
+            (str(sender).lower(), "{sender}"),
+        ]
+
+        generalised: List[str] = []
+        for value in param_values:
+            text = str(value)
+            match = next((ph for concrete, ph in reverse if text.lower() == concrete), None)
+            generalised.append(match or text)
+        return generalised
+
     @classmethod
     def build_calldata_for_route(
         cls, quote: RouteQuote, intent: UserIntent, sender_address: str
     ) -> str:
-        """Selects the correct encoder based on route specifications."""
+        """
+        Encode a route from the signature and parameters it carries, or refuse.
+
+        This replaced a switch on `quote.calldata_template`. Two of its branches were
+        the worst kind of fabrication in the codebase: `"stellar_soroban_invoke"`
+        returned the UTF-8 bytes of the string `stellar_invoke:deposit(...)` as though
+        that were a transaction, and the fall-through invented the signature
+        `bridge(uint256,address,uint256)` — a function that exists on no protocol — for
+        any route it did not recognise, guaranteeing well-formed calldata for a call
+        that cannot succeed.
+
+        There is now one encoding path. Whether the route came from the agent or from a
+        cached skill, it must say which function it is calling and with what.
+        """
         recipient = intent.recipient or sender_address
+        params = quote.extra_params or {}
 
-        if quote.calldata_template == "stellar_soroban_invoke":
-            return "0x" + bytes(f"stellar_invoke:deposit({intent.amount},{recipient})", "utf-8").hex()
+        signature = params.get("function_signature")
+        param_types = params.get("param_types") or []
+        param_values = params.get("param_values")
 
-        if quote.calldata_template in ("cctp_deposit_for_burn", "skill_verified"):
-            raw_domain = quote.extra_params.get("destination_domain") or quote.extra_params.get("cctp_domain")
-            dst_domain = int(raw_domain) if raw_domain is not None else 0
-            return cls.encode_cctp_deposit_for_burn(
-                amount_raw=quote.deposit_amount_raw,
-                destination_domain=dst_domain,
-                recipient_address=recipient,
-                burn_token_address=quote.source_token_address,
+        if not signature or param_values is None:
+            raise ValueError(
+                f"Cannot encode a call for {quote.bridge_name!r}: the route carries no "
+                "function signature and parameter values. A route that does not say "
+                "which function it calls is not a route."
             )
 
-        if quote.calldata_template == "across_deposit_v3":
-            return cls.encode_across_deposit_v3(
-                depositor=sender_address,
-                recipient=recipient,
-                input_token=quote.source_token_address,
-                output_token=quote.dest_token_address,
-                input_amount=quote.deposit_amount_raw,
-                output_amount=quote.estimated_output_raw,
-                destination_chain_id=quote.dest_chain_id,
-            )
-
-        # Generic Bridge Deposit Call (dynamic fallback)
-        func_sig = "bridge(uint256,address,uint256)"
-        return cls.encode_dynamic_calldata(
-            func_sig,
-            ["uint256", "address", "uint256"],
-            [
-                quote.deposit_amount_raw,
-                CalldataExecutor.require_evm_address(recipient, "recipient"),
-                quote.dest_chain_id,
-            ],
+        bound = cls.bind_param_values(
+            list(param_values),
+            amount_raw=quote.deposit_amount_raw,
+            recipient=recipient,
+            sender=sender_address,
         )
+        values = cls.coerce_param_values(list(param_types), bound)
+        return cls.encode_dynamic_calldata(signature, list(param_types), values)
 
     @staticmethod
     def generate_ephemeral_python_script(

@@ -127,6 +127,10 @@ def synthesize(
         extra_params={
             "dest_chain_ref": proposal.dest_chain_ref,
             "function_signature": proposal.function_signature,
+            # Carried through so the skill write-back can store this route as a
+            # procedure rather than a single frozen transaction.
+            "param_types": list(proposal.param_types),
+            "param_values": [str(v) for v in proposal.param_values],
             "selector": selector,
             "sources": proposal.sources,
             "rationale": proposal.rationale,

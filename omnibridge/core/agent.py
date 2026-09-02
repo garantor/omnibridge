@@ -149,49 +149,92 @@ class OmnibridgeAgent:
 
         # 6. Skill Registration & Self-Persistence
         console.print("[bold cyan]💾 STEP 6: Registering Procedural SKILL.md for Future In-Memory Reuse...[/bold cyan]")
+        params = quote.extra_params or {}
         skill_name = f"{intent.source_chain.lower()}_to_{intent.dest_chain.lower()}_{intent.token.lower()}"
+
+        # Placeholders in place of this run's amount and addresses, so a replay encodes
+        # the next caller's transfer instead of a frozen copy of this one.
+        stored_values = CalldataExecutor.generalise_param_values(
+            list(params.get("param_values") or []),
+            amount_raw=quote.deposit_amount_raw,
+            recipient=intent.recipient or sender_address,
+            sender=sender_address,
+        )
+
+        try:
+            dest_chain_id = self.rpc_manager.discover_chain_metadata(
+                intent.dest_chain, network=intent.network
+            ).chain_id
+        except Exception:
+            # A destination that is not EIP-155 addressable has no chain id. Left unset
+            # and named by dest_chain_ref rather than filled with a plausible number.
+            dest_chain_id = None
+
         metadata = SkillMetadata(
             name=skill_name,
-            description=f"Verified bridge procedure for {intent.token} from {intent.source_chain} to {intent.dest_chain} via {quote.bridge_name}",
-            source_chain=intent.source_chain,
+            description=(
+                f"Verified bridge procedure for {intent.token} from {intent.source_chain} "
+                f"to {intent.dest_chain} via {quote.bridge_name}"
+            ),
+            source_chain=src_chain_info.name,
             source_chain_id=quote.source_chain_id,
             dest_chain=intent.dest_chain,
-            dest_chain_id=quote.dest_chain_id,
+            dest_chain_id=dest_chain_id,
+            dest_chain_ref=params.get("dest_chain_ref"),
             token=intent.token,
             bridge_protocol=quote.bridge_name,
             router_address=quote.router_address,
-            source_token_address=quote.source_token_address,
-            dest_token_address=quote.dest_token_address,
-            cctp_destination_domain=quote.extra_params.get("destination_domain") or quote.extra_params.get("cctp_domain"),
-            last_verified="2026-09-01",
+            source_token_address=quote.source_token_address or None,
+            dest_token_address=quote.dest_token_address or None,
+            cctp_destination_domain=params.get("destination_domain"),
+            network=intent.network,
+            function_signature=params.get("function_signature"),
+            param_types=list(params.get("param_types") or []),
+            param_values=stored_values,
+            aliases=sorted({
+                intent.source_chain.lower(),
+                intent.dest_chain.lower(),
+                src_chain_info.name.lower(),
+            }),
+            verified=True,
+            # Was pinned to the literal string "2026-09-01", so every skill this flow
+            # ever wrote claimed to have been verified on the day the line was typed.
+            last_verified=receipt.timestamp[:10],
+            sources=list(params.get("sources") or []),
             rpc_fallbacks=src_chain_info.rpc_urls,
             tags=["cross-chain", intent.token.lower(), intent.source_chain, intent.dest_chain],
         )
 
+        rows = "\n".join(
+            f"| {i} | `{t}` | `{v}` |"
+            for i, (t, v) in enumerate(zip(metadata.param_types, metadata.param_values))
+        )
         skill_body = f"""# {skill_name.upper()} Execution Routine
 
-## Route Metadata
+## Route
 - **Protocol:** {quote.bridge_name}
-- **Source Router Contract:** `{quote.router_address}`
+- **Router:** `{quote.router_address}`
+- **Function:** `{metadata.function_signature}`
 - **Source Token:** `{quote.source_token_address}`
-- **Destination Token:** `{quote.dest_token_address}`
+- **Destination:** {metadata.dest_chain_ref or metadata.dest_chain_id or intent.dest_chain}
 
-## Calldata Assembly
-```python
-# Ephemeral Web3.py execution helper
-from omnibridge.core.executor import CalldataExecutor
+## Parameters
 
-calldata = CalldataExecutor.encode_cctp_deposit_for_burn(
-    amount_raw={quote.deposit_amount_raw},
-    destination_domain={metadata.cctp_destination_domain or 3},
-    recipient_address="{sender_address}",
-    burn_token_address="{quote.source_token_address}",
-)
-```
+Encoded through `CalldataExecutor.encode_dynamic_calldata`; placeholders are bound per
+request by `CalldataExecutor.bind_param_values`.
 
-## Security & Verification Notes
-- Verified with zero-revert simulation against RPC.
-- Gas profile benchmarked at ~{sim_res.gas_used} units.
+| # | Type | Value |
+|---|------|-------|
+{rows}
+
+## Verification
+- Simulation {sim_res.status.value} on chain {sim_res.simulated_on_chain_id} via {sim_res.simulated_via_rpc}
+- Gas profile ~{sim_res.gas_used} units
+- Approved by a human and broadcast as `{receipt.tx_hash}`
+
+The body previously carried a literal `encode_cctp_deposit_for_burn(...)` call with
+`destination_domain or 3` — Arbitrum's domain — as the fallback for every route,
+including routes that were not CCTP at all. A skill records what was verified.
 """
 
         saved_path = self.skill_manager.save_skill(metadata, skill_body)

@@ -713,6 +713,63 @@ Hermes' create → use → detect weakness → self-patch cycle, applied:
   failure. A skill with no recent successful verification is a hypothesis, not a fact, and the
   manifest should say so.
 
+### Found while implementing Phase 4
+
+- **The agent's calldata was being thrown away.** `code_builder_node` called
+  `build_calldata_for_route` unconditionally, so a proposal that had already been
+  provenance-checked and encoded by `synthesis` was silently re-encoded through the
+  template chain. Phase 3 was wired but its output never reached the simulator. The node
+  now passes an `agent_proposed` payload through untouched.
+- **The generic fall-through was the worst fabrication left.** It invented
+  `bridge(uint256,address,uint256)` — a function that exists on no protocol — for any
+  route it did not recognise, so it *always* produced well-formed calldata for a call
+  that could not succeed. The `stellar_soroban_invoke` branch was worse still: it
+  returned the UTF-8 bytes of the string `stellar_invoke:deposit(100.0,G…)` as a
+  transaction payload.
+- **`fetch_doc_content_tool` invented documentation.** On any failed fetch it returned a
+  CCTP signature and domain table for URLs containing "circle", a *fabricated* Strkey
+  address for anything mentioning Stellar, and otherwise the signature
+  `deposit(uint256,address,uint32)` with selector `0x2f820a5f` — a made-up interface
+  presented as a documented one. A bare `requests.get` against a JS-rendered docs site
+  usually fails, so this was the normal path, not the edge case.
+- **The template chain could not simply be deleted; it had to be replaced.** A cached
+  skill still needs encoding. Rather than keep a switch on a curated template name
+  (Rule B), a route now carries its own signature, parameter types and parameter values,
+  and there is one encoding path for both agent proposals and cache hits.
+- **"No route" now terminates as a state, not an exception.** It was propagating out of
+  the graph and taking the traces with it. It is still a refusal — `NO_ROUTE_FOUND` has
+  no edge to the approval gate and is never retried — but the run is now inspectable.
+
+### Found while implementing Phase 5
+
+- **The cache was matching on substrings, in both directions.** `m_src in s_src or s_src
+  in m_src` meant a skill recorded for `base` answered a request for `base sepolia`: a
+  mainnet router returned for a testnet transfer, which simulates cleanly and sends real
+  funds to the wrong network. Matching is now exact against the skill's name or an alias
+  it earned at save time, and scoped by network family.
+- **A skill stored one transaction, not a procedure.** The body was a hex blob and a
+  hardcoded `encode_cctp_deposit_for_burn(...)` call whose destination domain defaulted
+  to Arbitrum's for every route, CCTP or not. Parameters are now stored with this run's
+  amount and addresses replaced by placeholders, bound per request by reviewed code.
+  Verified against the golden set: generalise a real mainnet call, bind it back, and the
+  bytes match the transaction the chain accepted.
+- **`dest_chain_id=200` was hardcoded for every route.** A destination that is not
+  EIP-155 addressable has no chain id, so it is now left unset and named by
+  `dest_chain_ref`. `last_verified` was likewise pinned to the literal string
+  `"2026-09-01"` in the standalone flow.
+- **Demotion needed a trace that survives the retry.** `error_node` runs once per
+  attempt; the pass after the retry was overwriting the record written by the pass that
+  actually demoted the skill.
+
+### Verified end to end, without credentials
+
+Storing a confirmed mainnet CCTP transaction as a skill and replaying it through the
+graph: the route came from skill memory, the calldata rebuilt from the stored signature
+matched the on-chain bytes exactly, it still went through `eth_call`, reverted honestly
+(`ERC20: transfer amount exceeds allowance` — the original approval no longer stands),
+the skill was demoted, and the retry ended cleanly with the skill retained but no longer
+served. That is the whole loop, minus the model.
+
 ---
 
 ## Explicit non-goals

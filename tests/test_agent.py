@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import pytest
 
 from omnibridge.core.models import UserIntent
 from omnibridge.core.agent import OmnibridgeAgent
-from omnibridge.discovery.route_finder import RouteFinder
+from omnibridge.discovery.route_finder import NoCachedRoute, RouteFinder
 
 
 BASE_TO_ARBITRUM = dict(
@@ -17,20 +19,32 @@ BASE_TO_ARBITRUM = dict(
 
 def test_discovery_refuses_rather_than_inventing_a_router():
     """
-    No router address is obtainable today: web search yields none for this query and
-    the skill repository holds no verified route. Discovery must therefore fail loudly
-    rather than return a route built from a guess.
+    The skill repository holds no verified route for this pair, so RouteFinder must say
+    so rather than return one built from a guess.
 
-    This asserts the guardrail, not the plumbing, so it should survive Phase 3 — it
-    will simply stop being reached once the agent can genuinely find a route, and will
-    still hold for pairs where no bridge exists.
+    Before Phase 4 it fell through to scraping search-result text and returned the first
+    `0x…` string it matched as the router contract. The refusal is the guardrail; the
+    exception type changed when that path was deleted, so this asserts the behaviour
+    rather than the wording.
     """
     finder = RouteFinder()
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(NoCachedRoute) as excinfo:
         finder.discover_route(UserIntent(**BASE_TO_ARBITRUM))
 
-    message = str(excinfo.value).lower()
-    assert "route discovery error" in message or "rpc discovery error" in message
+    assert "has to be discovered" in str(excinfo.value)
+
+
+def test_route_finder_cannot_scrape_the_web_at_all():
+    """
+    The deletion, asserted structurally. A refusal that can be reintroduced by one
+    `except: pass` is not a guardrail, so the capability is gone, not disabled.
+    """
+    import omnibridge.discovery.route_finder as rf
+
+    assert not hasattr(rf.RouteFinder, "_query_online_route_manifest")
+    source = Path(rf.__file__).read_text()
+    assert "web_search_tool" not in source
+    assert "re.findall" not in source
 
 
 @pytest.mark.xfail(

@@ -7,6 +7,7 @@ answer-shaped whenever it could not answer — the intent parser substituted
 success=True with invented gas. These tests exist so that habit cannot come back.
 """
 
+from pathlib import Path
 import pytest
 
 from omnibridge.core.models import SimulationStatus, UserIntent
@@ -60,15 +61,25 @@ def test_missing_wallet_is_rejected_not_zero_addressed():
 
 # ---------------------------------------------------------------- 1.2 search
 
-def test_search_does_not_fabricate_a_result():
+def test_the_fabricating_search_tools_are_gone(code_only):
     """
-    An empty search returns nothing. It used to append a hit citing docs.circle.com
-    and claiming router contracts had been "resolved" for the query.
-    """
-    from tools import web_search_tool
+    Phase 1 stopped `web_search_tool` appending a fabricated hit that cited
+    docs.circle.com and claimed router contracts had been "resolved". Phase 4 deleted
+    both it and `fetch_doc_content_tool`, which invented an ABI signature and selector
+    — and a Strkey contract address — whenever a page fetch failed, which was the
+    normal case against JS-rendered docs.
 
-    text = web_search_tool.invoke("zzzq nonexistent chain xyzzy no such protocol 12345")
-    assert "Official router contracts and public RPC endpoints resolved" not in text
+    Search is now the model's own server-side tool, constrained to an allowlist and
+    cited in the proposal. Asserted as absence: a fabrication path that still exists is
+    one line away from being called again.
+    """
+    import tools
+
+    assert not hasattr(tools, "web_search_tool")
+    assert not hasattr(tools, "fetch_doc_content_tool")
+    source = code_only(tools.__file__)
+    assert "0x2f820a5f" not in source
+    assert "duckduckgo" not in source.lower()
 
 
 # ------------------------------------------------------- 1.3/1.4/1.5 simulator

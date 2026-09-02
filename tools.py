@@ -2,13 +2,10 @@
 Custom LangChain Tool Definitions for In-Transit Web3 Execution with Verbose Telemetry Logging.
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 import json
 import io
 import sys
-import time
-import requests
-import urllib.parse
 from pathlib import Path
 from langchain_core.tools import tool
 from rich.console import Console
@@ -18,7 +15,6 @@ from web3 import Web3
 from omnibridge.skills.manager import SkillManager, SkillMetadata
 from omnibridge.discovery.rpc_manager import RPCManager
 from omnibridge.discovery.route_finder import RouteFinder
-from omnibridge.core.models import UserIntent
 from omnibridge.core.executor import CalldataExecutor
 from omnibridge.core.simulator import Simulator
 from omnibridge.core.signer import Signer
@@ -31,131 +27,26 @@ rpc_manager = RPCManager()
 route_finder = RouteFinder(skill_manager=skill_manager, rpc_manager=rpc_manager)
 
 
-@tool
-def web_search_tool(query: str) -> str:
-    """Searches live documentation, web articles, and blockchain registries for contract addresses, chain parameters, and RPC endpoints."""
-    start_time = time.perf_counter()
-    console.print(f"\n[bold cyan]🔍 [LANGCHAIN TOOL CALL] -> web_search_tool[/bold cyan]")
-    console.print(f"   [bold yellow]↳ Search Query:[/bold yellow] [white]\"{query}\"[/white]")
-    
-    raw_hits = []
-
-    # 1. Query DuckDuckGo Instant Answer / Topic Search API for live web documentation
-    try:
-        encoded_q = urllib.parse.quote(query)
-        ddg_resp = requests.get(
-            f"https://api.duckduckgo.com/?q={encoded_q}&format=json&no_html=1&skip_disambig=1",
-            timeout=2.5,
-            headers={"User-Agent": "Omnibridge-Agent/2.0"}
-        )
-        if ddg_resp.status_code == 200:
-            ddg_json = ddg_resp.json()
-            if ddg_json.get("AbstractText"):
-                raw_hits.append({
-                    "title": ddg_json.get("Heading", "Documentation Summary"),
-                    "source": ddg_json.get("AbstractURL", "https://duckduckgo.com"),
-                    "snippet": ddg_json.get("AbstractText")
-                })
-            for topic in ddg_json.get("RelatedTopics", [])[:3]:
-                if isinstance(topic, dict) and topic.get("Text"):
-                    raw_hits.append({
-                        "title": topic.get("FirstURL", "Web Doc").split("/")[-1].replace("_", " "),
-                        "source": topic.get("FirstURL", ""),
-                        "snippet": topic.get("Text")
-                    })
-    except Exception as e:
-        console.print(f"   [dim]↳ Web query fallback: {e}[/dim]")
-
-    # 2. Query DeFiLlama Cross-Chain Bridge Registry
-    try:
-        resp = requests.get("https://bridges.llama.fi/bridges?includeChains=true", timeout=2.5)
-        if resp.status_code == 200:
-            bridges = resp.json().get("bridges", [])
-            # Search for matching bridges in query
-            q_lower = query.lower()
-            matching = [b for b in bridges if any(chain.lower() in q_lower for chain in b.get("chains", []))]
-            for b in (matching[:3] if matching else bridges[:2]):
-                raw_hits.append({
-                    "title": f"Bridge Protocol: {b.get('displayName', b.get('name'))}",
-                    "source": f"https://defillama.com/bridges",
-                    "snippet": f"Supports {len(b.get('chains', []))} chains: {', '.join(b.get('chains', [])[:5])}. Volume 24h: ${b.get('volumePrevDay', 0):,.2f} USD."
-                })
-    except Exception as e:
-        console.print(f"   [dim]↳ Bridge index query: {e}[/dim]")
-
-    # No synthetic fallback. This previously appended a fabricated hit that echoed the
-    # query back with docs.circle.com hardcoded as its source and claimed "official
-    # router contracts and public RPC endpoints resolved" — text that then flowed into
-    # route discovery as if it had come from the web. Because DuckDuckGo's Instant
-    # Answer API returns entity abstracts rather than search results, and is empty for
-    # nearly every technical query, that fabricated branch was the normal path.
-    # An empty result is empty.
-
-    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-
-    # Format the complete raw search response
-    formatted_results_text = ""
-    for idx, hit in enumerate(raw_hits, 1):
-        formatted_results_text += f"[{idx}] {hit['title']} ({hit['source']})\n    Snippet: {hit['snippet']}\n"
-
-    # PRINT 1: The ACTUAL Raw Search Result First
-    console.print(Panel(
-        formatted_results_text.strip(),
-        title=f"[bold yellow]🌐 [RAW WEB SEARCH RESULTS RECEIVED ({elapsed_ms:.1f}ms)][/bold yellow]",
-        border_style="yellow"
-    ))
-
-    return formatted_results_text
-
-
-@tool
-def fetch_doc_content_tool(doc_url: str) -> str:
-    """Fetches and inspects live documentation pages, developer portals, and smart contract ABIs to extract exact method signatures and parameters."""
-    start_time = time.perf_counter()
-    console.print(f"\n[bold cyan]📖 [LANGCHAIN TOOL CALL] -> fetch_doc_content_tool[/bold cyan]")
-    console.print(f"   [bold yellow]↳ Querying Doc URL:[/bold yellow] [white]{doc_url}[/white]")
-
-    extracted_doc = ""
-    try:
-        if doc_url.startswith("http"):
-            resp = requests.get(doc_url, timeout=3.0, headers={"User-Agent": "Omnibridge-Agent/2.0"})
-            if resp.status_code == 200:
-                raw_text = resp.text[:2000]
-                extracted_doc = f"Fetched {len(resp.text)} bytes from {doc_url}.\nSnippet: {raw_text[:400]}..."
-    except Exception as e:
-        console.print(f"   [dim]↳ Direct HTTP fetch error: {e}[/dim]")
-
-    if not extracted_doc:
-        # Fallback to protocol documentation specifications
-        if "circle" in doc_url or "cctp" in doc_url:
-            extracted_doc = (
-                "Protocol: Circle CCTP (TokenMessenger)\n"
-                "Function: depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken)\n"
-                "Selector: 0x6fd3504e\n"
-                "Domain IDs: Ethereum=0, Avalanche=1, Optimism=2, Arbitrum=3, Solana=5, Base=6, Polygon=7"
-            )
-        elif "stellar" in doc_url or "soroban" in doc_url:
-            extracted_doc = (
-                "Protocol: Stellar Soroban Cross-Chain Relay\n"
-                "Function: deposit(amount: i128, recipient: Bytes32)\n"
-                "Contract Format: Strkey encoded (CB4D6V3FOWV3I73YPQEZJ5B4S4V3S3B2E2Q7Y7P2Z4B7W4Q4M2E)"
-            )
-        else:
-            extracted_doc = (
-                f"Documentation for {doc_url}:\n"
-                "Method: deposit(uint256 amount, address recipient, uint32 destinationChainId)\n"
-                "Selector: 0x2f820a5f\n"
-                "Requires ERC20 approve pre-flight."
-            )
-
-    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-    console.print(Panel(
-        f"[bold white]Doc URL:[/bold white] {doc_url}\n"
-        f"[bold white]Extracted Contract Interface & Requirements:[/bold white]\n{extracted_doc}",
-        title=f"[bold magenta]📖 [DEEP DOC SPECIFICATION INSPECTED ({elapsed_ms:.1f}ms)][/bold magenta]",
-        border_style="magenta"
-    ))
-    return extracted_doc
+# `web_search_tool` and `fetch_doc_content_tool` were deleted here (plan Phase 4).
+#
+# Search is now the model's own server-side `web_search_20260209` / `web_fetch_20260209`,
+# constrained to a documentation allowlist and cited back in the proposal — see
+# omnibridge/agent/discovery_agent.py.
+#
+# The two tools they replaced could not do the job they were called for, and failed
+# open when they could not:
+#
+#   - `web_search_tool` queried DuckDuckGo's *Instant Answer* API, which returns entity
+#     abstracts rather than search results and is empty for essentially every technical
+#     query. Its DeFiLlama branch listed bridge names and 24h volumes — never a contract
+#     address, which is the one thing route discovery needed from it.
+#   - `fetch_doc_content_tool` invented documentation whenever a fetch failed: a CCTP
+#     signature and domain table for any URL containing "circle", a *fabricated* Strkey
+#     contract address for anything mentioning Stellar, and for everything else the
+#     signature `deposit(uint256,address,uint32)` with the selector `0x2f820a5f` — a
+#     made-up interface presented as a documented one. Because a bare `requests.get`
+#     against a JS-rendered docs site usually fails, the fabricated branch was the
+#     normal path.
 
 
 @tool

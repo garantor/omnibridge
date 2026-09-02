@@ -45,6 +45,9 @@ class GraphState(TypedDict):
     failure_context: Optional[str]
     budget: Optional[Dict[str, Any]]
     agent_evidence: Optional[Dict[str, Any]]
+    # Set when this run replayed a cached skill, so a failure can demote that skill
+    # rather than a fresh discovery silently overwriting it.
+    replayed_skill: Optional[str]
 
 
 # Bounded by plan 3.4. Three attempts, then the run ends.
@@ -156,10 +159,13 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
     }
 
 
-# --- NODE 2: Skill Check or Web Search Discovery ---
+# --- NODE 2: Skill Replay or Agent Discovery ---
 def discovery_node(state: GraphState) -> Dict[str, Any]:
     from rich.console import Console
     from rich.panel import Panel
+
+    from omnibridge.discovery.route_finder import NoCachedRoute
+
     _console = Console()
 
     intent = UserIntent(
@@ -170,51 +176,69 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
         recipient=state["user_address"],
     )
 
-    search_query = f"Bridge {state['asset']} from {state['source_chain']} to {state['target_chain']} official routers & RPCs"
-
     # Tier 0: a verified skill short-circuits discovery entirely.
-    # Tier 1: the reasoning core, unless the kill switch forces the static path.
+    # Tier 1: the reasoning core, unless the kill switch forces the cache-only path.
     agent_result = _run_discovery_agent(state, intent)
     if agent_result is not None:
         return agent_result
 
-    quote = finder.discover_route(intent)
+    # Cache-only. There is no third tier: the web-scraping fallback that used to sit
+    # here returned the first hex string it found on a search page as the router
+    # address, and this node then printed it as a "Parsed Protocol". A route this
+    # system has not verified is a route it does not have.
+    #
+    # "No route" is a correct answer, so it terminates as one — a recorded state with
+    # its traces intact, rather than an exception thrown out of the graph. It is still
+    # a refusal: NO_ROUTE_FOUND has no edge to the approval gate, and route_after_error
+    # never retries it.
+    try:
+        quote = finder.discover_route(intent)
+    except NoCachedRoute as exc:
+        traces = state.get("traces", {})
+        traces["step_2_discovery"] = {
+            "title": "Route & Contract Discovery",
+            "source_type": "SKILL_MEMORY_CACHE",
+            "outcome": "NO_ROUTE_FOUND",
+            "reason": str(exc),
+            "status": "COMPLETED",
+        }
+        _console.print(Panel(
+            f"[bold yellow]{exc}[/bold yellow]\n\n"
+            "[dim]No verified route, and no reasoning core available to find one — set "
+            "ANTHROPIC_API_KEY, or unset OMNIBRIDGE_DISABLE_AGENT.[/dim]",
+            title="[bold yellow]📋 [STEP 2: NO ROUTE FOUND][/bold yellow]",
+            border_style="yellow",
+        ))
+        return {
+            "status": "NO_ROUTE_FOUND",
+            "error": str(exc),
+            "traces": traces,
+        }
     fastest_rpc = rpc_mgr.get_fastest_rpc_sync(state["source_chain"])
-    is_cached = "Skill" in quote.bridge_name or "Verified" in quote.bridge_name
+    skill_name = quote.extra_params.get("skill_name")
 
-    # Explicitly invoke LangChain web_search_tool (it prints the RAW search results first)
-    from tools import web_search_tool, fetch_doc_content_tool
-    search_log = web_search_tool.invoke(search_query)
-
-    # Extract documentation link from search results and deep-inspect the docs
-    doc_urls = re.findall(r'https?://[^\s()]+', search_log)
-    target_doc = doc_urls[0] if doc_urls else "https://docs.circle.com/cctp"
-    doc_specs = fetch_doc_content_tool.invoke(target_doc)
-
-    # PRINT 2: Then print the PARSED extraction and intended parameters
     _console.print(Panel(
-        f"[bold green]Parsed Protocol:[/bold green] {quote.bridge_name} ({'⚡ Skill Memory' if is_cached else '🔍 Web Search'})\n"
-        f"[bold green]Router Contract to Use:[/bold green] [white]`{quote.router_address}`[/white]\n"
-        f"[bold green]Source Token Address:[/bold green] [white]`{quote.source_token_address}`[/white]\n"
-        f"[bold green]Destination Token Address:[/bold green] [white]`{quote.dest_token_address}`[/white]\n"
+        f"[bold green]Protocol:[/bold green] {quote.bridge_name}\n"
+        f"[bold green]Router Contract:[/bold green] [white]`{quote.router_address}`[/white]\n"
+        f"[bold green]Function:[/bold green] {quote.extra_params.get('function_signature')}\n"
         f"[bold green]Active Selected RPC:[/bold green] [cyan]{fastest_rpc}[/cyan]\n"
-        f"[bold green]Chain IDs:[/bold green] {quote.source_chain_id} ({state['source_chain']}) ➔ {quote.dest_chain_id} ({state['target_chain']})",
-        title="[bold green]📋 [STEP 2: PARSED EXTRACTED PARAMETERS INTENDED TO USE][/bold green]",
+        f"[bold green]Source Chain ID:[/bold green] {quote.source_chain_id}\n"
+        f"[bold green]Destination:[/bold green] {quote.extra_params.get('dest_chain_ref') or quote.dest_chain_id}\n"
+        f"[dim]Replayed from skill memory. It still has to clear simulation — a skill is a "
+        f"shortcut past discovery, never past the guardrails.[/dim]",
+        title="[bold green]📋 [STEP 2: CACHED ROUTE REPLAYED FROM SKILL MEMORY][/bold green]",
         border_style="green"
     ))
 
     traces = state.get("traces", {})
     traces["step_2_discovery"] = {
         "title": "Route & Contract Discovery",
-        "source_type": "SKILL_MEMORY_CACHE" if is_cached else "DYNAMIC_WEB_DOCS_SEARCH",
-        "search_query": search_query,
-        "web_search_tool_output": search_log,
-        "deep_doc_url": target_doc,
-        "deep_doc_specs": doc_specs,
+        "source_type": "SKILL_MEMORY_CACHE",
+        "skill_name": skill_name,
+        "skill_path": quote.extra_params.get("skill_path"),
         "discovered_route": quote.bridge_name,
         "router_contract": quote.router_address,
-        "source_token": quote.source_token_address,
-        "dest_token": quote.dest_token_address,
+        "function_signature": quote.extra_params.get("function_signature"),
         "active_rpc": fastest_rpc,
         "status": "COMPLETED",
     }
@@ -228,6 +252,7 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
             "quote_obj": quote.model_dump(),
         },
         "active_rpc": fastest_rpc,
+        "replayed_skill": skill_name,
         "status": "ROUTE_DISCOVERED",
         "traces": traces,
     }
@@ -285,7 +310,14 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
             "budget": budget.as_dict(),
             "status": "COMPLETED",
         }
-        raise NoRouteFound(exc.reason, exc.sources)
+        # Terminal, and never retried: another attempt spends money to reach the same
+        # answer. Returned as a state so the reasoning and the sources survive.
+        return {
+            "status": "NO_ROUTE_FOUND",
+            "error": exc.reason,
+            "budget": budget.as_dict(),
+            "traces": traces,
+        }
 
     w3 = None
     try:
@@ -342,6 +374,13 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     }
 
 
+def route_after_discovery(state: GraphState) -> str:
+    """NO_ROUTE_FOUND ends the run. There is nothing downstream that can improve on it."""
+    if state.get("status") == "NO_ROUTE_FOUND":
+        return "error_node"
+    return "code_builder_node"
+
+
 def route_after_error(state: GraphState) -> str:
     """
     A revert is the highest-quality signal this system produces. Feed it back.
@@ -374,7 +413,15 @@ def code_builder_node(state: GraphState) -> Dict[str, Any]:
         recipient=state["user_address"],
     )
 
-    calldata = CalldataExecutor.build_calldata_for_route(quote, intent, state["user_address"])
+    # An agent proposal arrives already encoded, and already checked: synthesis
+    # recomputed the selector, verified the router's bytecode carries it, and packed the
+    # parameters. Re-encoding it here would silently discard all of that and run the
+    # values back through a different path — so the agent's bytes pass through unchanged.
+    existing = state.get("unsigned_transaction_hex")
+    if quote.calldata_template == "agent_proposed" and existing:
+        calldata = existing
+    else:
+        calldata = CalldataExecutor.build_calldata_for_route(quote, intent, state["user_address"])
     ephemeral_script = CalldataExecutor.generate_ephemeral_python_script(
         rpc_url=state.get("active_rpc", ""),
         router_address=quote.router_address,
@@ -564,34 +611,90 @@ def broadcast_skill_node(state: GraphState) -> Dict[str, Any]:
 
     receipt = signer.broadcast_transaction(tx_payload, private_key=None, dry_run=False)
 
-    # Persist SKILL.md
-    skill_name = f"{state['source_chain'].lower()}_to_{state['target_chain'].lower()}_{state['asset'].lower()}"
+    # Persist SKILL.md — the write-back that makes the second identical request free.
+    quote = RouteQuote(**state["route"]["quote_obj"])
+    params = quote.extra_params or {}
+    src_name = state["source_chain"]
+    dst_name = state["target_chain"]
+    skill_name = f"{src_name.lower()}_to_{dst_name.lower()}_{state['asset'].lower()}"
+
+    # Store the parameters with this run's amount and addresses swapped for placeholders,
+    # so a replay encodes the next caller's transfer rather than a frozen copy of this one.
+    stored_values = CalldataExecutor.generalise_param_values(
+        list(params.get("param_values") or []),
+        amount_raw=quote.deposit_amount_raw,
+        recipient=state["user_address"],
+        sender=state["user_address"],
+    )
+
+    # The destination chain id was hardcoded to 200 here, for every route, regardless of
+    # where the transfer was actually going. A destination that is not EIP-155 addressable
+    # has no chain id at all, so it is left unset and named by dest_chain_ref instead.
+    dest_chain_id: Optional[int] = None
+    dest_chain_ref = params.get("dest_chain_ref")
+    try:
+        dest_chain_id = rpc_mgr.discover_chain_metadata(dst_name).chain_id
+    except Exception:
+        dest_chain_id = None
+
+    sim = state.get("simulation_result") or {}
     metadata = SkillMetadata(
         name=skill_name,
-        description=f"Verified bridge workflow for {state['asset']} from {state['source_chain']} to {state['target_chain']} via {state['route']['bridge']}",
-        source_chain=state["source_chain"],
+        description=(
+            f"Verified bridge workflow for {state['asset']} from {src_name} to "
+            f"{dst_name} via {state['route']['bridge']}"
+        ),
+        source_chain=src_chain_info.name,
         source_chain_id=src_chain_info.chain_id,
-        dest_chain=state["target_chain"],
-        dest_chain_id=200,
+        dest_chain=dst_name,
+        dest_chain_id=dest_chain_id,
+        dest_chain_ref=dest_chain_ref,
         token=state["asset"],
         bridge_protocol=state["route"]["bridge"],
         router_address=state["route"]["router_address"],
+        source_token_address=quote.source_token_address or None,
+        dest_token_address=quote.dest_token_address or None,
+        network="mainnet",
+        function_signature=params.get("function_signature"),
+        param_types=list(params.get("param_types") or []),
+        param_values=stored_values,
+        # Earned, not enumerated: the strings that actually resolved to this route.
+        aliases=sorted({src_name.lower(), dst_name.lower(), src_chain_info.name.lower()}),
+        verified=True,
         last_verified=receipt.timestamp[:10],
+        sources=list(params.get("sources") or []),
+        discovered_by=(state.get("agent_evidence") or {}).get("model") or "skill_replay",
         rpc_fallbacks=src_chain_info.rpc_urls,
-        tags=["cross-chain", state["asset"].lower(), state["source_chain"].lower(), state["target_chain"].lower()],
+        tags=["cross-chain", state["asset"].lower(), src_name.lower(), dst_name.lower()],
     )
 
     skill_body = f"""# {skill_name.upper()} Execution Routine
 
-## Route Metadata
-- **Bridge:** {state['route']['bridge']}
-- **Router Contract:** `{metadata.router_address}`
+## Route
+- **Protocol:** {metadata.bridge_protocol}
+- **Router:** `{metadata.router_address}`
+- **Function:** `{metadata.function_signature}`
+- **Destination:** {dest_chain_ref or dest_chain_id or dst_name}
 
-## Procedural Execution Code
-```python
-# Auto-generated via LangGraph Node 6
-unsigned_hex = "{state['unsigned_transaction_hex']}"
-```
+## Parameters
+Encoded through `CalldataExecutor.encode_dynamic_calldata`. Placeholders are bound per
+request by `CalldataExecutor.bind_param_values`; everything else is fixed for this route.
+
+| # | Type | Value |
+|---|------|-------|
+""" + "\n".join(
+        f"| {i} | `{t}` | `{v}` |"
+        for i, (t, v) in enumerate(zip(metadata.param_types, metadata.param_values))
+    ) + f"""
+
+## Verification
+- Simulation: {sim.get('status')} on chain {sim.get('simulated_on_chain_id')} via {sim.get('simulated_via_rpc')}
+- Gas: {sim.get('gas_used')} units
+- Approved by a human and broadcast as `{receipt.tx_hash}`
+- Sources: {', '.join(metadata.sources) if metadata.sources else 'skill replay (no new sources)'}
+
+A cache hit skips discovery, not the guardrails: a replay is re-simulated and
+re-approved before it can send anything.
 """
 
     skill_path = skill_mgr.save_skill(metadata, skill_body, target_dir=str(LOCAL_SKILLS_DIR / skill_name))
@@ -622,7 +725,30 @@ def error_node(state: GraphState) -> Dict[str, Any]:
     """
     sim = state.get("simulation_result") or {}
     reason = state.get("error") or sim.get("revert_reason")
-    retryable = sim.get("status") in ("REVERTED", "UNAVAILABLE") and bool(reason)
+    retryable = (
+        sim.get("status") in ("REVERTED", "UNAVAILABLE")
+        and bool(reason)
+        and state.get("status") != "NO_ROUTE_FOUND"
+    )
+
+    # Demote before patching. If this run replayed a cached skill and it failed, the
+    # skill stops being served — but it is not rewritten here. The replacement lands
+    # only once it has itself cleared simulation and the human gate, which is what
+    # stops a transient RPC error from overwriting a known-good route with whatever a
+    # cold search turned up.
+    demoted = None
+    replayed = state.get("replayed_skill")
+    if replayed and reason:
+        cached = next(
+            (sk for sk in skill_mgr.list_skills() if sk.metadata.name == replayed), None
+        )
+        if cached is not None and cached.metadata.verified:
+            try:
+                demoted = skill_mgr.mark_unverified(
+                    cached, f"{sim.get('status') or 'FAILED'}: {reason}"
+                )
+            except Exception as exc:  # never let bookkeeping mask the original failure
+                demoted = f"demotion failed: {exc}"
 
     failure_context = None
     if retryable and state.get("retry_count", 0) < MAX_DISCOVERY_RETRIES:
@@ -634,12 +760,22 @@ def error_node(state: GraphState) -> Dict[str, Any]:
         )
 
     traces = state.get("traces", {})
+    # This node runs once per attempt, so the second pass must not erase what the first
+    # recorded. The demotion happens on the pass that saw the failure; by the time the
+    # retry comes back through, the skill is already unverified and `demoted` is None.
+    previous = traces.get("step_error") or {}
     traces["step_error"] = {
         "title": "Diagnostic",
         "error": reason,
         "simulation_status": sim.get("status"),
         "retry_count": state.get("retry_count", 0),
         "will_retry": failure_context is not None,
+        "demoted_skill": demoted or previous.get("demoted_skill"),
+        "attempts": [*previous.get("attempts", []), {
+            "simulation_status": sim.get("status"),
+            "error": reason,
+            "demoted_skill": demoted,
+        }],
     }
 
     return {
@@ -664,7 +800,9 @@ builder.add_node("error_node", error_node)
 
 builder.add_edge(START, "intent_parser_node")
 builder.add_edge("intent_parser_node", "discovery_node")
-builder.add_edge("discovery_node", "code_builder_node")
+builder.add_conditional_edges(
+    "discovery_node", route_after_discovery, ["code_builder_node", "error_node"]
+)
 builder.add_edge("code_builder_node", "simulator_node")
 builder.add_conditional_edges("simulator_node", route_after_simulation, ["hitl_gate_node", "error_node"])
 builder.add_edge("hitl_gate_node", "broadcast_skill_node")
