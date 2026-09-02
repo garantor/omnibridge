@@ -48,16 +48,6 @@ class CalldataExecutor:
         )
 
     @staticmethod
-    def encode_erc20_approve(spender_address: str, amount_raw: int) -> str:
-        """Encodes ERC-20 approve(address,uint256) -> 0x095ea7b3."""
-        selector = bytes.fromhex("095ea7b3")
-        checksum_spender = (
-            CalldataExecutor.require_evm_address(spender_address, "spender_address")
-        )
-        encoded_args = encode(["address", "uint256"], [checksum_spender, amount_raw])
-        return "0x" + (selector + encoded_args).hex()
-
-    @staticmethod
     def require_evm_address(value: str, field: str) -> str:
         """
         Checksum an address, or raise.
@@ -80,89 +70,18 @@ class CalldataExecutor:
             raise ValueError(f"Invalid EVM address for {field}: {value!r} is not hex.")
         return Web3.to_checksum_address(value)
 
-    @classmethod
-    def encode_cctp_deposit_for_burn(
-        cls,
-        amount_raw: int,
-        destination_domain: Optional[int],
-        recipient_address: str,
-        burn_token_address: str,
-    ) -> str:
-        """
-        Encodes Circle CCTP TokenMessenger depositForBurn:
-        depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken)
-        """
-        func_sig = "depositForBurn(uint256,uint32,bytes32,address)"
-        selector = Web3.keccak(text=func_sig)[:4]
-
-        recipient_b32 = cls.pad_bytes32_address(recipient_address)
-        burn_token_checksum = (
-            CalldataExecutor.require_evm_address(burn_token_address, "burn_token_address")
-        )
-        if destination_domain is None:
-            raise ValueError(
-                "CCTP destinationDomain is required. Defaulting it to 0 would encode "
-                "Ethereum as the destination — a wrong chain, not an absent one."
-            )
-        valid_domain = int(destination_domain)
-
-        encoded_args = encode(
-            ["uint256", "uint32", "bytes32", "address"],
-            [amount_raw, valid_domain, recipient_b32, burn_token_checksum],
-        )
-        return "0x" + (selector + encoded_args).hex()
-
-    @classmethod
-    def encode_across_deposit_v3(
-        cls,
-        depositor: str,
-        recipient: str,
-        input_token: str,
-        output_token: str,
-        input_amount: int,
-        output_amount: int,
-        destination_chain_id: int,
-        relayer: str = "0x0000000000000000000000000000000000000000",
-        quote_timestamp: int = 0,
-        fill_deadline: int = 2147483647,
-        exclusivity_deadline: int = 0,
-        message: bytes = b"",
-    ) -> str:
-        """Encodes Across V3 SpokePool depositV3 calldata on-the-fly."""
-        func_sig = "depositV3(address,address,address,address,uint256,uint256,uint256,address,uint32,uint32,uint32,bytes)"
-        selector = Web3.keccak(text=func_sig)[:4]
-
-        encoded_args = encode(
-            [
-                "address",
-                "address",
-                "address",
-                "address",
-                "uint256",
-                "uint256",
-                "uint256",
-                "address",
-                "uint32",
-                "uint32",
-                "uint32",
-                "bytes",
-            ],
-            [
-                CalldataExecutor.require_evm_address(depositor, "depositor"),
-                CalldataExecutor.require_evm_address(recipient, "recipient"),
-                CalldataExecutor.require_evm_address(input_token, "input_token"),
-                CalldataExecutor.require_evm_address(output_token, "output_token"),
-                input_amount,
-                output_amount,
-                destination_chain_id,
-                CalldataExecutor.require_evm_address(relayer, "relayer"),
-                quote_timestamp,
-                fill_deadline,
-                exclusivity_deadline,
-                message,
-            ],
-        )
-        return "0x" + (selector + encoded_args).hex()
+    # Three named encoders were removed here: encode_erc20_approve,
+    # encode_cctp_deposit_for_burn and encode_across_deposit_v3.
+    #
+    # They were the branch targets of the `calldata_template` switch that Phase 4
+    # deleted, and once that switch was gone nothing in the running system called them
+    # — only the golden tests, which existed to prove the generic encoder reproduced
+    # the same bytes. It does, against real mainnet transactions, so keeping a
+    # hand-written encoder per protocol is precisely the per-bridge integration cost
+    # this project exists to avoid (Rule B).
+    #
+    # Anything they did is now expressible as a route: a canonical signature, its
+    # parameter types, and its values. `approve(address,uint256)` included.
 
     @classmethod
     def encode_dynamic_calldata(cls, func_sig: str, param_types: List[str], param_values: List[Any]) -> str:

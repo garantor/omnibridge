@@ -15,7 +15,10 @@ class UserIntent(BaseModel):
     dest_chain: str = Field(description="Destination chain name (e.g. hyperliquid, arbitrum, optimism)")
     recipient: Optional[str] = Field(default=None, description="Destination recipient address (defaults to sender)")
     max_slippage_bps: int = Field(default=50, description="Max slippage in basis points (50 = 0.5%)")
-    priority: str = Field(default="low_fee", description="Routing priority: 'low_fee', 'fastest', 'native'")
+    # `priority` ("low_fee" | "fastest" | "native") was removed. The CLI accepted it and
+    # passed it through, and nothing ever read it — a flag that silently did nothing.
+    # Route selection is the agent's judgement; when it becomes steerable it should be
+    # steerable in the prompt, not by a field no code consults.
     network: Literal["mainnet", "testnet"] = Field(
         default="mainnet",
         description="Which network family to resolve chains on. Chain resolution refuses to "
@@ -29,7 +32,9 @@ class ChainInfo(BaseModel):
     native_symbol: str = "ETH"
     block_explorer: str
     rpc_urls: List[str]
-    cctp_domain: Optional[int] = None
+    # `cctp_domain` was removed: never set, never read, and a protocol-specific
+    # field on a generic chain model is the curated-table shape Rule B rules out.
+    # A destination's identity travels as `dest_chain_ref`, which names its scheme.
 
 
 class RouteQuote(BaseModel):
@@ -43,7 +48,9 @@ class RouteQuote(BaseModel):
     estimated_output_raw: int
     decimals: int = 6
     fee_amount_usd: float = 0.0
-    gas_estimate_units: int = 200000
+    # `gas_estimate_units` was removed. It was only ever written as 0 and never read,
+    # and its 200000 default was an invented figure that would have reached a manifest
+    # as though measured. Real gas comes from the simulator or is reported as absent.
     calldata_template: str = ""
     extra_params: Dict[str, Any] = Field(default_factory=dict)
 
@@ -76,7 +83,6 @@ class SimulationResult(BaseModel):
 
     output_amount_valid: bool = True
     calldata_preview: str = ""
-    logs_count: int = 0
 
     # What was actually checked, so the manifest can state the scope of verification
     # rather than letting silence imply end-to-end assurance.

@@ -3,22 +3,20 @@ LangGraph State Machine for Headless Web3 In-Transit Bridging Engine with Full O
 """
 
 from typing import Dict, Any, Optional, TypedDict
-import json
 import os
 import re
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import interrupt, Command
+from langgraph.types import interrupt
 
 from omnibridge.core.models import UserIntent, RouteQuote
-from omnibridge.skills.manager import SkillManager, SkillMetadata
+from omnibridge.skills.manager import LOCAL_SKILLS_DIR, SkillManager, SkillMetadata
 from omnibridge.discovery.rpc_manager import RPCManager
 from omnibridge.discovery.route_finder import RouteFinder
 from omnibridge.core.executor import CalldataExecutor
 from omnibridge.core.simulator import Simulator, is_evm_address
 from omnibridge.core.models import SimulationStatus
 from omnibridge.core.signer import Signer
-from tools import LOCAL_SKILLS_DIR
 
 
 class GraphState(TypedDict):
@@ -269,7 +267,7 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     """
     from omnibridge.agent.budget import RequestBudget
     from omnibridge.agent.discovery_agent import DiscoveryAgent, NoRouteFound, agent_disabled
-    from omnibridge.agent.synthesis import ProposalRejected, synthesize
+    from omnibridge.agent.synthesis import synthesize
 
     if agent_disabled():
         return None

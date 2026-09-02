@@ -41,7 +41,7 @@ omnibridge = "omnibridge.cli:main"
 include = ["omnibridge*"]
 
 [tool.setuptools]
-py-modules = ["graph", "server", "tools"]
+py-modules = ["graph", "server"]
 
 [tool.pytest.ini_options]
 markers = [

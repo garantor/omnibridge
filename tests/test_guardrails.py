@@ -7,10 +7,9 @@ answer-shaped whenever it could not answer — the intent parser substituted
 success=True with invented gas. These tests exist so that habit cannot come back.
 """
 
-from pathlib import Path
 import pytest
 
-from omnibridge.core.models import SimulationStatus, UserIntent
+from omnibridge.core.models import SimulationStatus
 from omnibridge.core.simulator import Simulator, is_evm_address
 from omnibridge.discovery.rpc_manager import (
     RPCManager,
@@ -61,25 +60,19 @@ def test_missing_wallet_is_rejected_not_zero_addressed():
 
 # ---------------------------------------------------------------- 1.2 search
 
-def test_the_fabricating_search_tools_are_gone(code_only):
+def test_the_fabricating_search_tools_are_gone():
     """
-    Phase 1 stopped `web_search_tool` appending a fabricated hit that cited
-    docs.circle.com and claimed router contracts had been "resolved". Phase 4 deleted
-    both it and `fetch_doc_content_tool`, which invented an ABI signature and selector
-    — and a Strkey contract address — whenever a page fetch failed, which was the
-    normal case against JS-rendered docs.
+    Phase 1 stopped `web_search_tool` appending a fabricated hit citing docs.circle.com.
+    Phase 4 deleted it along with `fetch_doc_content_tool`, which invented an ABI
+    signature, a selector and a Strkey contract address whenever a page fetch failed —
+    the normal case against JS-rendered docs.
 
-    Search is now the model's own server-side tool, constrained to an allowlist and
-    cited in the proposal. Asserted as absence: a fabrication path that still exists is
-    one line away from being called again.
+    The module that held them is gone entirely: with those two removed, nothing in the
+    running system called anything else in it. Search is now the model's own
+    server-side tool, constrained to an allowlist and cited in the proposal.
     """
-    import tools
-
-    assert not hasattr(tools, "web_search_tool")
-    assert not hasattr(tools, "fetch_doc_content_tool")
-    source = code_only(tools.__file__)
-    assert "0x2f820a5f" not in source
-    assert "duckduckgo" not in source.lower()
+    with pytest.raises(ImportError):
+        import tools  # noqa: F401
 
 
 # ------------------------------------------------------- 1.3/1.4/1.5 simulator
@@ -227,34 +220,32 @@ def test_encoder_refuses_to_substitute_the_zero_address():
     """
     A recipient that cannot be encoded used to become 0x0 — a burn that simulates
     perfectly. A Stellar G-address reaching an EVM encoder is exactly this case.
+
+    Asserted through the generic path now that the per-protocol encoders are gone; the
+    check itself is the same `require_evm_address` those encoders called.
     """
     from omnibridge.core.executor import CalldataExecutor
 
     with pytest.raises(ValueError) as excinfo:
-        CalldataExecutor.encode_across_deposit_v3(
-            depositor=VALID_SENDER,
-            recipient="GABCDEF1234567890NOTANEVMADDRESS",
-            input_token=SOME_ROUTER,
-            output_token=SOME_ROUTER,
-            input_amount=1_000_000,
-            output_amount=999_000,
-            destination_chain_id=42161,
+        CalldataExecutor.coerce_param_values(
+            ["uint256", "address"], ["1000000", "GABCDEF1234567890NOTANEVMADDRESS"]
         )
     assert "Refusing to substitute the zero address" in str(excinfo.value)
 
 
-def test_cctp_requires_an_explicit_destination_domain():
-    """Domain 0 is Ethereum, not 'unset'. Defaulting to it picks a wrong chain."""
+def test_a_missing_parameter_cannot_be_defaulted_away():
+    """
+    CCTP domain 0 is Ethereum, not "unset", and the named encoder guarded that. With
+    one generic encoder the guarantee is structural instead: a value cannot go missing,
+    because the arity of the signature and the values must agree before anything is
+    packed. A dropped domain is a refusal, not a silent 0.
+    """
     from omnibridge.core.executor import CalldataExecutor
 
+    types = ["uint256", "uint32", "bytes32", "address"]
     with pytest.raises(ValueError) as excinfo:
-        CalldataExecutor.encode_cctp_deposit_for_burn(
-            amount_raw=1_000_000,
-            destination_domain=None,
-            recipient_address=VALID_SENDER,
-            burn_token_address=SOME_ROUTER,
-        )
-    assert "destinationDomain is required" in str(excinfo.value)
+        CalldataExecutor.coerce_param_values(types, ["1000000", "0x" + "11" * 32, SOME_ROUTER])
+    assert "arity mismatch" in str(excinfo.value)
 
 
 def test_non_evm_recipient_is_never_hashed_into_a_new_address():

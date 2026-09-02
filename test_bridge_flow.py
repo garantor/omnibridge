@@ -23,7 +23,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from langgraph.types import Command
-from graph import graph, LOCAL_SKILLS_DIR
+from graph import graph
 
 console = Console()
 

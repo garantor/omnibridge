@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from omnibridge.agent.budget import BudgetExceeded, RequestBudget
+from omnibridge.agent.budget import RequestBudget
 
 MODEL = os.environ.get("OMNIBRIDGE_MODEL", "claude-opus-5")
 

@@ -122,7 +122,6 @@ def synthesize(
         estimated_output_raw=raw_amount if raw_amount is not None else 0,
         decimals=decimals,
         fee_amount_usd=0.0,
-        gas_estimate_units=0,
         calldata_template="agent_proposed",
         extra_params={
             "dest_chain_ref": proposal.dest_chain_ref,

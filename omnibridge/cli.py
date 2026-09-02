@@ -23,7 +23,6 @@ def handle_bridge(args):
         dest_chain=args.dest_chain,
         recipient=args.recipient,
         max_slippage_bps=args.slippage_bps,
-        priority=args.priority,
     )
 
     agent = OmnibridgeAgent()
@@ -94,7 +93,6 @@ def main():
     # allowances, which says nothing about this transfer.
     bridge_parser.add_argument("--sender", "-s", required=True, help="Your sender address")
     bridge_parser.add_argument("--slippage-bps", type=int, default=50, help="Max slippage in basis points (50 = 0.5%)")
-    bridge_parser.add_argument("--priority", default="low_fee", choices=["low_fee", "fastest", "native"])
     bridge_parser.add_argument("--yes", "-y", action="store_true", help="Auto-approve without interactive prompt (for tests/automation)")
     bridge_parser.add_argument("--dry-run", action="store_true", help="Rehearse without broadcasting; never inferred from a missing key")
 

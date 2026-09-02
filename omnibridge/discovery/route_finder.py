@@ -85,7 +85,6 @@ class RouteFinder:
             # Not measured on a cache hit. Zero here means "not measured"; the previous
             # 0.05 / 190000 pair were invented numbers that reached the manifest as facts.
             fee_amount_usd=0.0,
-            gas_estimate_units=0,
             calldata_template="skill_verified",
             extra_params={
                 "skill_name": meta.name,

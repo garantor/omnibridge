@@ -300,7 +300,6 @@ def test_an_unsupported_chain_is_not_retried():
 def test_agent_path_is_skipped_without_credentials(monkeypatch):
     """No key means the static path, not a crash."""
     import graph
-    from omnibridge.core.models import UserIntent
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)

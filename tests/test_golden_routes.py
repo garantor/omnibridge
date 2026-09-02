@@ -78,27 +78,12 @@ def test_generic_encoder_reproduces_real_calldata(fx):
     assert (encoded + suffix).lower() == expected.lower()
 
 
-@pytest.mark.parametrize("fx", CCTP, ids=CCTP_IDS)
-def test_template_encoder_agrees_with_the_generic_one(fx):
-    """
-    Phase 4 deletes encode_cctp_deposit_for_burn in favour of the generic encoder.
-    Holding both against the same real bytes is what licenses that deletion.
-
-    The non-EVM fixtures (Solana, Sui) are the load-bearing ones here: their mintRecipient
-    is a genuine 32-byte key, and pad_bytes32_address used to keccak-hash any recipient
-    longer than 20 bytes into a well-formed, unrecoverable address.
-    """
-    recipient_b32 = bytes.fromhex(fx["param_values"][2][2:])
-    evm_shaped = recipient_b32[:12] == b"\x00" * 12
-    recipient = "0x" + (recipient_b32[12:] if evm_shaped else recipient_b32).hex()
-
-    encoded = CalldataExecutor.encode_cctp_deposit_for_burn(
-        amount_raw=int(fx["param_values"][0]),
-        destination_domain=fx["dest_domain"],
-        recipient_address=recipient,
-        burn_token_address=fx["param_values"][3],
-    )
-    assert encoded.lower() == fx["expected_calldata"].lower()
+# `test_template_encoder_agrees_with_the_generic_one` stood here. Its purpose was to
+# license Phase 4's deletion of the per-protocol encoders by holding them and the
+# generic one against the same real transactions. They agreed, the encoders are gone,
+# and the test went with them — `test_generic_encoder_reproduces_real_calldata` above
+# covers the same fixtures, including the Solana and Sui ones whose mintRecipient is a
+# genuine 32-byte key.
 
 
 @pytest.mark.parametrize("fx", CCTP, ids=CCTP_IDS)
@@ -220,7 +205,6 @@ def test_build_calldata_refuses_a_route_that_names_no_function():
         estimated_output_raw=1000000,
         decimals=6,
         fee_amount_usd=0.0,
-        gas_estimate_units=0,
         calldata_template="generic",
         extra_params={},
     )
@@ -276,7 +260,6 @@ def test_a_stored_route_reproduces_real_calldata_through_build_calldata_for_rout
         estimated_output_raw=int(fx["amount_raw"]),
         decimals=fx["decimals"],
         fee_amount_usd=0.0,
-        gas_estimate_units=0,
         calldata_template="skill_verified",
         extra_params={
             "function_signature": fx["function_signature"],

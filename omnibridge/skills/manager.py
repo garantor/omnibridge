@@ -19,9 +19,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
-from typing import Dict, List, Optional, Any
+from typing import List, Optional
 import yaml
 from pydantic import BaseModel, Field
+
+
+# The repository the running system reads and writes. It sits at the project root
+# rather than inside the package so a checkout's skills are visible as data, not as
+# installed code.
+LOCAL_SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
 
 
 def _utc_today() -> str:

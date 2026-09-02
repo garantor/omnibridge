@@ -683,7 +683,8 @@ Only after Phase 3 reaches parity. Each deletion is justified by a golden-set te
 - `_query_online_route_manifest`, `route_finder.py` — README gap 5 disappears with the function that
   causes it.
 - The hardcoded `dest_chain_id=200`, `graph.py:353`, replaced by the agent's resolved value.
-- The DuckDuckGo scraper and doc fetcher in `tools.py`, superseded by §3.2.
+- The DuckDuckGo scraper and doc fetcher in `tools.py`, superseded by §3.2. (In the event the
+  whole module went: with those two removed, nothing called anything else in it.)
 
 This is where the codebase stops being traditional software with agentic vocabulary and starts
 matching its own README.

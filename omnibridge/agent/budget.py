@@ -11,7 +11,7 @@ estimate_gas are read-only and spend nothing on chain.
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 class BudgetExceeded(RuntimeError):

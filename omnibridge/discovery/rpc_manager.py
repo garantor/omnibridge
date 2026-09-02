@@ -91,13 +91,12 @@ class RPCManager:
         self.dynamic_chains: Dict[str, ChainInfo] = {}
         self._registry_cache: Optional[List[Dict[str, Any]]] = None
 
-    def register_discovered_chain(self, chain_info: ChainInfo) -> None:
-        """Registers dynamically discovered chain metadata into the runtime session cache."""
-        self.dynamic_chains[chain_info.name.lower()] = chain_info
-
-    def get_chain_info(self, chain_name: str) -> Optional[ChainInfo]:
-        """Looks up dynamically discovered or cached chain info."""
-        return self.dynamic_chains.get(chain_name.lower().strip())
+    # `register_discovered_chain` and `get_chain_info` were removed here. Both read and
+    # wrote `dynamic_chains` directly, bypassing the resolution guards in
+    # `discover_chain_metadata` — the network-family filter, the ambiguity refusal and
+    # the name-similarity check. Nothing called them; `get_chain_info` was the cause of
+    # the `rpc-bench` bug, since it only ever read a cache that only
+    # `discover_chain_metadata` populates.
 
     def _fetch_registry(self) -> List[Dict[str, Any]]:
         """Fetch the EVM chain registry once per manager instance."""

@@ -79,7 +79,6 @@ The same six stages as a straight synchronous call, with approval as a terminal 
 | [`core/simulator.py`](omnibridge/core/simulator.py) | `eth_call` + `estimate_gas`; the revert circuit breaker |
 | [`core/signer.py`](omnibridge/core/signer.py) | Broadcast — raw RLP, or an already-submitted hash returned by a browser wallet |
 | [`skills/manager.py`](omnibridge/skills/manager.py) | `SKILL.md` with YAML frontmatter — exact-match lookup, demote-on-failure, retained revisions |
-| [`tools.py`](tools.py) | LangChain tool surface with verbose telemetry |
 
 ---
 
@@ -156,7 +155,7 @@ Ordered by how much they matter.
 
 5. **Cold-path cost is unmeasured.** An Opus 5 discovery run with search and fetches costs materially more than a cache hit. Skills amortise it, but the cold number is not yet known.
 
-6. **The LangChain tool surface is dead code.** `python_repl_runner`, `eth_call_simulator`, `rpc_broadcaster` and `save_skill_tool` in [`tools.py`](tools.py) are defined and never invoked — the graph calls the underlying classes directly, and the agent uses Anthropic's server-side tools. Only `LOCAL_SKILLS_DIR` is imported from that module. Either wire them or delete them.
+6. **The CLI and the LangGraph runtime still differ on broadcast.** The CLI passes `dry_run=(private_key is None)`; the graph passes `dry_run=False`. Behaviour observed in one does not carry to the other.
 
 ### Closed since the first revision of this file
 
@@ -172,6 +171,7 @@ Recorded because each was silently wrong rather than loudly broken — the class
 - The skill cache matched chain names by substring in both directions, so a mainnet skill answered a testnet request.
 - Persisted skills recorded `dest_chain_id=200` for every route, and a `last_verified` date pinned to a literal string.
 - `rpc-bench` always reported `Unknown chain`, because it read a cache that only `discover_chain_metadata()` populates.
+- `tools.py` held a LangChain tool surface — `python_repl_runner` (a bare `exec`), `eth_call_simulator`, `rpc_broadcaster`, `save_skill_tool` — that nothing ever invoked. Deleted with the module.
 - The intent parser substituted `Unknown / 1.0 NATIVE` for anything it could not parse and reported `COMPLETED`.
 - A malformed resume payload read as `USER_APPROVED`, carrying unsigned calldata forward as though a human had signed it.
 

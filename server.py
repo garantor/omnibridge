@@ -4,7 +4,7 @@ Manages /api/bridge/start and /api/bridge/resume using native LangGraph state ch
 """
 
 import uuid
-from typing import Optional, Dict, Any
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from langgraph.types import Command
