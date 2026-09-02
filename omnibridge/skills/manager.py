@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
-from typing import List, Optional
+from typing import Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
@@ -72,6 +72,9 @@ class SkillMetadata(BaseModel):
     # (CalldataExecutor.PLACEHOLDERS), so a replay encodes the caller's transfer and
     # not a frozen copy of whichever one happened to be verified first.
     param_values: List[str] = Field(default_factory=list)
+    # The ERC-20 approval this route needs, if any. A replay without it rebuilds a
+    # single-transaction plan and reverts on allowance exactly as a cold route would.
+    spend: Optional[Dict[str, str]] = None
 
     # The strings that have actually resolved to this route, earned at save time rather
     # than enumerated in advance.

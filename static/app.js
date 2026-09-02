@@ -63,6 +63,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const connectWalletBtn = document.getElementById("connect-wallet-btn");
   const walletBtnText = document.getElementById("wallet-btn-text");
   const chips = document.querySelectorAll(".chip");
+  const logSection = document.getElementById("log-section");
+  const logStream = document.getElementById("log-stream");
+  const logAutoscroll = document.getElementById("log-autoscroll");
+  const logCopyBtn = document.getElementById("log-copy-btn");
 
   let userConnectedAddress = null;
   let currentThreadId = null;
@@ -208,6 +212,66 @@ document.addEventListener("DOMContentLoaded", () => {
 
   refreshSkillsBtn.addEventListener("click", loadSkills);
   loadSkills();
+
+  // ------------------------------------------------------------- live log
+
+  const LEVEL_CLASS = {
+    green: "log-ok", red: "log-fail", yellow: "log-warn",
+    cyan: "log-step", dim: "log-detail",
+  };
+
+  let logSource = null;
+  const logLines = [];
+
+  function resetLog() {
+    logLines.length = 0;
+    logStream.textContent = "";
+    logSection.classList.remove("hidden");
+  }
+
+  function appendLogRecord(rec) {
+    const cls = LEVEL_CLASS[rec.level] || "log-detail";
+    const line = `${String(rec.t).padStart(6)}s ${rec.marker} ${rec.scope}  ${rec.message}`;
+    logLines.push(line);
+
+    const el = document.createElement("div");
+    el.className = `log-line ${cls}`;
+    el.innerHTML =
+      `<span class="log-t">${String(rec.t).padStart(6)}s</span>` +
+      `<span class="log-marker">${esc(rec.marker)}</span>` +
+      `<span class="log-scope">${esc(rec.scope)}</span>` +
+      `<span class="log-msg">${esc(rec.message)}</span>`;
+    logStream.appendChild(el);
+
+    if (logAutoscroll.checked) logStream.scrollTop = logStream.scrollHeight;
+  }
+
+  function openLogStream(runId) {
+    closeLogStream();
+    // Opened before the run starts: /api/bridge/start does not return until the whole
+    // graph has finished, so a stream attached afterwards would have nothing left to show.
+    logSource = new EventSource(`/api/logs/${encodeURIComponent(runId)}`);
+    logSource.onmessage = (e) => {
+      try { appendLogRecord(JSON.parse(e.data)); } catch (_) { /* keep-alive */ }
+    };
+    logSource.addEventListener("end", closeLogStream);
+    logSource.onerror = () => { /* the run may simply be over; the POST result decides */ };
+  }
+
+  function closeLogStream() {
+    if (logSource) { logSource.close(); logSource = null; }
+  }
+
+  logCopyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(logLines.join("\n"));
+      logCopyBtn.textContent = "Copied";
+      setTimeout(() => { logCopyBtn.textContent = "Copy"; }, 1500);
+    } catch (_) {
+      logCopyBtn.textContent = "Copy failed";
+      setTimeout(() => { logCopyBtn.textContent = "Copy"; }, 1500);
+    }
+  });
 
   // ---------------------------------------------------------------- helpers
 
@@ -618,6 +682,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
   let currentAmount = null;
   let currentSourceChainId = null;
   let currentPlan = null;
+  let currentRunId = null;
 
   function nextPlanStep(plan) {
     return plan && plan.steps ? plan.steps.find((s) => !s.tx_hash) : null;
@@ -658,13 +723,18 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
         }
       }
 
+      currentRunId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      resetLog();
+      openLogStream(currentRunId);
+
       const response = await fetch("/api/bridge/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: query, userAddress: userConnectedAddress }),
+        body: JSON.stringify({ input: query, userAddress: userConnectedAddress, runId: currentRunId }),
       });
 
       const data = await response.json();
+      closeLogStream();
       syncPipeline(data);
 
       console.groupCollapsed("🌉 Omnibridge execution telemetry");
@@ -703,6 +773,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
       // A failed run may have retired a cached skill; the library should reflect it.
       if (data.demoted_skill) loadSkills();
     } catch (err) {
+      closeLogStream();
       outputSection.innerHTML = `<div class="verdict verdict-rose"><h3>Request failed</h3><p>${esc(err.message)}</p></div>`;
     } finally {
       executeBtn.disabled = false;
@@ -799,7 +870,8 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
           const adv = await fetch("/api/bridge/advance", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ thread_id: currentThreadId, step_index: step.index, tx_hash: hash }),
+            body: JSON.stringify({ thread_id: currentThreadId, step_index: step.index,
+                                   tx_hash: hash, runId: currentRunId }),
           });
           if (!adv.ok) throw new Error((await adv.json().catch(() => ({}))).detail || `server ${adv.status}`);
           const advData = await adv.json();

@@ -187,3 +187,52 @@ def test_the_approval_encodes_the_standard_selector():
     assert data.startswith("0x" + Web3.keccak(text="approve(address,uint256)")[:4].hex())
     assert data.startswith("0x095ea7b3")
     assert ROUTER[2:].lower() in data.lower()
+
+
+def test_the_models_spend_declaration_reaches_the_planner():
+    """
+    The wiring, asserted. `spend` existed on the proposal and the planner read it from
+    the quote, and nothing carried it between the two — so no approve step was ever
+    built and every ERC-20 route reverted on allowance exactly as before.
+    """
+    from omnibridge.agent.contract import RouteProposal, TokenSpend
+    from omnibridge.agent.synthesis import synthesize
+    from omnibridge.core.models import ChainInfo
+
+    proposal = RouteProposal(
+        protocol="CCTP", router_address=ROUTER,
+        function_signature="depositForBurn(uint256,uint32,bytes32,address)",
+        param_types=["uint256", "uint32", "bytes32", "address"],
+        param_values=[str(AMOUNT), "3", "0x" + "11" * 32, USDC],
+        source_chain_id=8453, dest_chain_ref={"scheme": "cctp_domain", "value": "3"},
+        sources=["https://docs.circle.com/a", "https://developers.circle.com/b"],
+        rationale="because",
+        spend=TokenSpend(token=USDC, spender=ROUTER, amount=str(AMOUNT)),
+    )
+    chain = ChainInfo(chain_id=8453, name="Base", block_explorer="", rpc_urls=[])
+
+    _calldata, quote, _evidence = synthesize(proposal, INTENT, chain, None)
+
+    assert quote.extra_params["spend"] == {
+        "token": USDC, "spender": ROUTER, "amount": str(AMOUNT),
+    }
+
+
+def test_a_replayed_skill_keeps_its_approval_step(tmp_path):
+    """A cache hit that forgets the approval reverts exactly as a cold route would."""
+    from omnibridge.discovery.route_finder import RouteFinder
+    from omnibridge.skills.manager import SkillManager, SkillMetadata
+
+    repo = SkillManager(repository_path=str(tmp_path))
+    repo.save_skill(SkillMetadata(
+        name="base_to_arbitrum_usdc", description="d",
+        source_chain="Base", source_chain_id=8453, dest_chain="arbitrum",
+        token="USDC", bridge_protocol="CCTP", router_address=ROUTER,
+        function_signature="depositForBurn(uint256,uint32,bytes32,address)",
+        param_types=["uint256"], param_values=["{amount_raw}"],
+        spend={"token": USDC, "spender": ROUTER, "amount": "{amount_raw}"},
+        aliases=["base", "arbitrum"],
+    ), "# body")
+
+    skill = repo.find_skill("base", "arbitrum", "USDC")
+    assert skill.metadata.spend["token"] == USDC

@@ -15,9 +15,13 @@ Two rules it follows, for the same reason the rest of the system does:
 """
 
 import os
+import queue
+import re
+import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator, Optional
+from contextvars import ContextVar
+from typing import Any, Dict, Iterator, List, Optional
 
 _LEVELS = {"quiet": 0, "normal": 1, "debug": 2}
 
@@ -38,6 +42,80 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# ---------------------------------------------------------------- the log bus
+#
+# The console trail is the only view of a run that takes a minute or more, and it was
+# only visible to whoever started the server. The bus lets a browser subscribe to the
+# same records as they happen.
+#
+# Records are published, not the formatted line: the terminal wants rich markup and the
+# browser wants structure, and rendering once for both produces something wrong for each.
+
+_MARKUP = re.compile(r"\[/?[a-zA-Z#][^\]]*\]")
+
+
+def strip_markup(text: str) -> str:
+    """Rich markup out. The browser styles from the record's fields instead."""
+    return _MARKUP.sub("", str(text))
+
+
+class LogBus:
+    """Fan-out of step records to whoever is watching a given run."""
+
+    def __init__(self) -> None:
+        self._subscribers: Dict[str, List["queue.Queue"]] = {}
+        self._lock = threading.Lock()
+
+    def subscribe(self, run_id: str) -> "queue.Queue":
+        q: "queue.Queue" = queue.Queue(maxsize=2000)
+        with self._lock:
+            self._subscribers.setdefault(run_id, []).append(q)
+        return q
+
+    def unsubscribe(self, run_id: str, q: "queue.Queue") -> None:
+        with self._lock:
+            watchers = self._subscribers.get(run_id) or []
+            if q in watchers:
+                watchers.remove(q)
+            if not watchers:
+                self._subscribers.pop(run_id, None)
+
+    def publish(self, run_id: str, record: Dict[str, Any]) -> None:
+        with self._lock:
+            watchers = list(self._subscribers.get(run_id) or [])
+        for q in watchers:
+            try:
+                q.put_nowait(record)
+            except queue.Full:
+                # A watcher that cannot keep up is dropped from this record, never
+                # blocking the run. Logging must not be able to stall a transfer.
+                pass
+
+    def has_watchers(self, run_id: str) -> bool:
+        with self._lock:
+            return bool(self._subscribers.get(run_id))
+
+
+LOG_BUS = LogBus()
+
+#: The run the current thread's log records belong to, if any.
+_CURRENT_RUN: ContextVar[Optional[str]] = ContextVar("omnibridge_run_id", default=None)
+
+
+@contextmanager
+def run_context(run_id: Optional[str]) -> Iterator[None]:
+    """Attribute every step record emitted inside this block to `run_id`."""
+    token = _CURRENT_RUN.set(run_id)
+    try:
+        yield
+    finally:
+        _CURRENT_RUN.reset(token)
+
+
+def current_run() -> Optional[str]:
+    return _CURRENT_RUN.get()
+
+
 class StepLogger:
     """Prints an indented, timed trail of what a stage actually did."""
 
@@ -49,9 +127,22 @@ class StepLogger:
         self._started = time.monotonic()
 
     def _emit(self, marker: str, style: str, message: str) -> None:
+        elapsed = time.monotonic() - self._started
+
+        # Published first, and regardless of the console level. A browser watching a
+        # run should not go blank because the server was started with OMNIBRIDGE_LOG=quiet.
+        run_id = current_run()
+        if run_id:
+            LOG_BUS.publish(run_id, {
+                "t": round(elapsed, 2),
+                "marker": marker.strip() or "·",
+                "level": style,
+                "scope": self.scope,
+                "message": strip_markup(message),
+            })
+
         if not self.enabled or self._console is None:
             return
-        elapsed = time.monotonic() - self._started
         self._console.print(
             f"[dim]{elapsed:6.2f}s[/dim] [{style}]{marker}[/{style}] "
             f"[dim]{self.scope}[/dim]  {message}"

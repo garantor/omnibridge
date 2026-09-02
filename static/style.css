@@ -805,3 +805,51 @@ body {
 .plan-step.step-bad  .plan-step-state { color: #fecdd3; }
 .plan-step.step-warn .plan-step-state { color: #fcd34d; }
 .plan-step.step-pending .plan-step-state { color: var(--text-muted); }
+
+/* ---------------------------------------------------------------------------
+   Live execution log.
+
+   Discovery takes a minute or more and /api/bridge/start does not return until
+   it is over, so this is the only account of what is happening while it does.
+   Monospace and colour-coded by level, matching the terminal trail.
+   --------------------------------------------------------------------------- */
+
+.log-section { margin-bottom: 1.5rem; }
+.log-actions { display: flex; align-items: center; gap: 0.75rem; }
+.log-toggle {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.log-stream {
+  margin: 0.75rem 0 0;
+  max-height: 22rem;
+  overflow-y: auto;
+  overflow-x: auto;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.74rem;
+  line-height: 1.65;
+  white-space: pre;
+}
+
+.log-line { display: flex; gap: 0.6rem; align-items: baseline; }
+.log-t      { color: var(--text-muted); flex: none; }
+.log-marker { flex: none; width: 1ch; font-weight: 700; }
+.log-scope  { color: var(--text-muted); flex: none; min-width: 9ch; }
+.log-msg    { white-space: pre-wrap; word-break: break-word; }
+
+.log-step   .log-marker { color: var(--accent-cyan); }
+.log-ok     .log-marker { color: var(--accent-green); }
+.log-warn   .log-marker { color: var(--accent-amber); }
+.log-warn   .log-msg    { color: #fcd34d; }
+.log-fail   .log-marker { color: var(--accent-rose); }
+.log-fail   .log-msg    { color: #fecdd3; }
+.log-detail .log-msg    { color: var(--text-secondary); }

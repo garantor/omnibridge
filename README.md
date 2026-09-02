@@ -16,7 +16,8 @@ The pipeline, the guardrails, the memory layer and the reasoning core are built.
 | Layer | State |
 | --- | --- |
 | Pipeline orchestration — 6 stages, checkpointed, HITL interrupt | Working |
-| Web UI, wallet connect, in-browser signing | Working |
+| Web UI, wallet connect, in-browser signing | Working — multi-step plans signed in order |
+| Live execution log streamed to the browser | Working — SSE, `GET /api/logs/{run_id}` |
 | `SKILL.md` procedural memory — exact-match lookup, demote-on-failure, retained revisions | Working (repository is currently empty) |
 | Calldata encoding | Working — one generic path, driven by a signature the route carries |
 | ERC-20 approvals | Working — allowance read on chain, exact-amount approval built and simulated, signed before the bridge call |
@@ -124,6 +125,8 @@ python server.py          # http://localhost:8000
 | `GET /docs` | OpenAPI |
 | `POST /api/bridge/start` | Runs stages 1–5. Returns the approval payload on success, or a terminal state with its traces. `userAddress` is required |
 | `POST /api/bridge/resume` | Resumes from the interrupt with a signed transaction. Reports `CONFIRMED` or `REJECTED` — never a status the graph did not reach |
+| `GET /api/logs/{run_id}` | Server-sent stream of the step log. Subscribe **before** calling `start` with the same `runId` — `start` does not return until the run is over |
+| `POST /api/bridge/advance` | Records a signed plan step and re-simulates the next against live state |
 | `GET /api/skills` | Lists persisted `SKILL.md` modules, including demoted ones, with their verification state |
 
 The approval screen shows the amount **decoded from the calldata being signed**, not the figure typed into the box, and disables signing when the two disagree. The simulation verdict, the on-chain provenance checks and the source citations are rendered from the response — nothing on the page is a fixed string.

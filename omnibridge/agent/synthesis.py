@@ -134,6 +134,9 @@ def synthesize(
             # procedure rather than a single frozen transaction.
             "param_types": list(proposal.param_types),
             "param_values": [str(v) for v in proposal.param_values],
+            # The approval this route needs, carried through to the planner. Without
+            # it no approve step is built and every ERC-20 route reverts on allowance.
+            "spend": proposal.spend.as_dict() if proposal.spend else None,
             "selector": selector,
             "sources": proposal.sources,
             "rationale": proposal.rationale,

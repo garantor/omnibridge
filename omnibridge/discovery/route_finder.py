@@ -92,6 +92,7 @@ class RouteFinder:
                 "function_signature": meta.function_signature,
                 "param_types": list(meta.param_types),
                 "param_values": list(meta.param_values),
+                "spend": meta.spend,
                 "dest_chain_ref": meta.dest_chain_ref,
                 "destination_domain": meta.cctp_destination_domain,
             },

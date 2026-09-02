@@ -926,6 +926,7 @@ def broadcast_skill_node(state: GraphState) -> Dict[str, Any]:
         function_signature=params.get("function_signature"),
         param_types=list(params.get("param_types") or []),
         param_values=stored_values,
+        spend=params.get("spend"),
         # Earned, not enumerated: the strings that actually resolved to this route.
         aliases=sorted({src_name.lower(), dst_name.lower(), src_chain_info.name.lower()}),
         verified=True,

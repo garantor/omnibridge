@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css?v=4.0">
+  <link rel="stylesheet" href="/static/style.css?v=5.0">
 </head>
 <body>
   <div class="app-container">
@@ -124,6 +124,21 @@
         </div>
       </section>
 
+      <!-- Live step log, streamed from the server as the run happens -->
+      <section id="log-section" class="log-section card hidden">
+        <div class="section-header-flex">
+          <div>
+            <h3>Live execution log</h3>
+            <p class="subtitle">Streamed as it happens. Discovery takes a minute or more; this is what the agent is actually doing.</p>
+          </div>
+          <div class="log-actions">
+            <label class="log-toggle"><input type="checkbox" id="log-autoscroll" checked> follow</label>
+            <button id="log-copy-btn" class="btn btn-secondary">Copy</button>
+          </div>
+        </div>
+        <pre id="log-stream" class="log-stream"></pre>
+      </section>
+
       <!-- Dynamic Output & Approval Area -->
       <section id="output-section" class="output-section card hidden">
         <!-- Injected dynamically via app.js -->
@@ -145,6 +160,6 @@
     </main>
   </div>
 
-  <script type="module" src="/static/app.js?v=5.0"></script>
+  <script type="module" src="/static/app.js?v=6.0"></script>
 </body>
 </html>
