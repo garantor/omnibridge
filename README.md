@@ -30,10 +30,15 @@ Concretely: with no credentials configured, **a route this system has not alread
 To exercise the discovery path:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # identity-linked keys only, see below
+cp .env.example .env      # then fill it in — .env is gitignored, never commit it
 python -m pytest tests/test_agent_discovery.py -k live   # live smoke test, skips without a key
 ```
+
+A `.env` at or above the working directory is loaded on import. **A real environment
+variable always wins** — the file is a default, not an override — so
+`ANTHROPIC_API_KEY=other python server.py` uses `other`. Every line needs a `NAME=value`:
+a bare secret on its own line sets nothing, and the loader says so rather than starting
+up as though it had worked. `OMNIBRIDGE_NO_DOTENV=1` skips the file.
 
 | Variable | Purpose |
 | --- | --- |
