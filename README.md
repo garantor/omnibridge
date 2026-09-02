@@ -163,15 +163,17 @@ Ordered by how much they matter.
 
 1. **The reasoning core has never been run against the live API.** Every model call in the test suite goes through a fake client. The control flow is genuinely covered — terminal tool calls, `pause_turn`, refusals, budget ceilings, retry bounds — but no request has ever been sent, so the request shape is unverified. Set `ANTHROPIC_API_KEY` and run the live smoke test in [`tests/test_agent_discovery.py`](tests/test_agent_discovery.py) before trusting it.
 
-2. **Non-EVM destinations halt at the simulation gate.** A Base → Stellar transfer is an ordinary Base transaction and simulates normally; a transaction *submitted to* a non-EVM chain has no `eth_call` path, so it returns `UNSUPPORTED` and the run ends. Real Soroban and Solana preflight is unbuilt, and it is the largest remaining item.
+2. **ERC-20 approvals are not built.** Every ERC-20 bridge needs two transactions — `approve(router, amount)` on the token, then the bridge call — and a `RouteProposal` carries exactly one function. So a correct CCTP route reverts with `ERC20: transfer amount exceeds allowance` at the simulation gate. The run now stops there and says which step is missing rather than retrying a route that was never wrong.
 
-3. **`eth_call` proves the source leg only.** No simulation can establish that funds arrive on the destination chain. The manifest says so explicitly rather than implying end-to-end verification.
+3. **Non-EVM destinations halt at the simulation gate.** A Base → Stellar transfer is an ordinary Base transaction and simulates normally; a transaction *submitted to* a non-EVM chain has no `eth_call` path, so it returns `UNSUPPORTED` and the run ends. Real Soroban and Solana preflight is unbuilt, and it is the largest remaining item.
 
-4. **Discovery is non-deterministic.** The same intent, run twice, may yield two different valid routers. The skill cache bounds this in practice — the first verified answer becomes the cached one — but whether that is sufficient for a financial path is a product decision.
+4. **`eth_call` proves the source leg only.** No simulation can establish that funds arrive on the destination chain. The manifest says so explicitly rather than implying end-to-end verification.
 
-5. **Cold-path cost is unmeasured.** An Opus 5 discovery run with search and fetches costs materially more than a cache hit. Skills amortise it, but the cold number is not yet known.
+5. **Discovery is non-deterministic.** The same intent, run twice, may yield two different valid routers. The skill cache bounds this in practice — the first verified answer becomes the cached one — but whether that is sufficient for a financial path is a product decision.
 
-6. **The CLI and the LangGraph runtime still differ on broadcast.** The CLI passes `dry_run=(private_key is None)`; the graph passes `dry_run=False`. Behaviour observed in one does not carry to the other.
+6. **Cold-path cost is unmeasured.** An Opus 5 discovery run with search and fetches costs materially more than a cache hit. Skills amortise it, but the cold number is not yet known.
+
+7. **The CLI and the LangGraph runtime still differ on broadcast.** The CLI passes `dry_run=(private_key is None)`; the graph passes `dry_run=False`. Behaviour observed in one does not carry to the other.
 
 ### Closed since the first revision of this file
 

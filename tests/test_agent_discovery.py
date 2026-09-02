@@ -454,3 +454,124 @@ def test_a_route_with_no_documentation_source_is_refused_by_verify_proposal():
     assert not report.ok
     assert any("documentation allowlist" in f for f in report.failures)
     assert report.selector_present, "the on-chain check should have passed"
+
+
+# ------------------------------------------------- prerequisite vs routing failure
+
+def test_an_allowance_revert_is_not_retried():
+    """
+    Observed burning three Gemini attempts (~170s) on the same allowance revert. The
+    route was correct each time; the retry edge told the model "do not repeat the same
+    router and arguments", so the only way to comply was to invent a different answer.
+    It went V1 -> V2 -> V1 with a freshly confabulated reason each time, because it
+    cannot observe allowance state and we asked it to explain a failure it could not see.
+    """
+    import graph as g
+
+    out = g.error_node({
+        "simulation_result": {
+            "status": "REVERTED",
+            "revert_reason": (
+                "Transaction reverted during eth_call: "
+                "('execution reverted: ERC20: transfer amount exceeds allowance', '0x08c379a0...')"
+            ),
+        },
+        "route": {"router_address": ROUTER},
+        "retry_count": 0,
+        "traces": {},
+    })
+
+    assert out["status"] == "MISSING_PREREQUISITE"
+    assert out["failure_context"] is None
+    assert out["retry_count"] == 0, "a missing step must not consume a retry"
+    assert g.route_after_error({**out}) == "__end__"
+    assert "approve(router, amount)" in out["error"]
+
+
+def test_an_insufficient_balance_revert_is_not_retried():
+    import graph as g
+
+    out = g.error_node({
+        "simulation_result": {
+            "status": "REVERTED",
+            "revert_reason": "execution reverted: ERC20: transfer amount exceeds balance",
+        },
+        "route": {"router_address": ROUTER},
+        "retry_count": 0,
+        "traces": {},
+    })
+    assert out["status"] == "MISSING_PREREQUISITE"
+    assert "does not hold enough" in out["error"]
+
+
+def test_an_ordinary_revert_is_still_retried():
+    """The retry edge is valuable when the route really is what failed."""
+    import graph as g
+
+    out = g.error_node({
+        "simulation_result": {"status": "REVERTED", "revert_reason": "execution reverted"},
+        "route": {"router_address": ROUTER},
+        "retry_count": 0,
+        "traces": {},
+    })
+    assert out["status"] == "ERROR"
+    assert out["failure_context"] and ROUTER in out["failure_context"]
+    assert g.route_after_error({**out}) == "discovery_node"
+
+
+def test_grounding_domains_are_matched_not_redirect_urls():
+    """
+    Gemini reports grounding as vertexaisearch.cloud.google.com redirect links. Comparing
+    those against a cited docs URL never matches, so every citation was flagged "never
+    fetched" — noise where the signal should be, which is worse than no check.
+    """
+    from omnibridge.agent.provenance import check_sources, registrable_domain
+
+    assert registrable_domain("developers.circle.com") == "developers.circle.com"
+    assert registrable_domain("https://developers.circle.com/x") == "developers.circle.com"
+
+    result = check_sources(
+        ["https://developers.circle.com/cctp/v1", "https://basescan.org/address/0x16"],
+        ["developers.circle.com"],
+        retrieved=["developers.circle.com", "basescan.org"],
+    )
+    assert result["unretrieved_citations"] == []
+
+
+def test_the_budget_survives_a_retry():
+    """
+    Restoring only `limits` meant every attempt began at zero: max_attempts was never
+    reached, and a 12-call ceiling became 12 per attempt. Three retries could spend 36
+    calls under a budget claiming to cap them at 12.
+    """
+    from omnibridge.agent.budget import RequestBudget
+
+    first = RequestBudget(max_model_calls=12)
+    first.start_attempt()
+    first.record_usage(type("U", (), {"input_tokens": 1000, "output_tokens": 200})())
+    first.record_usage(type("U", (), {"input_tokens": 1000, "output_tokens": 200})())
+
+    second = RequestBudget.restore(first.as_dict())
+
+    assert second.attempts == 1
+    assert second.model_calls == 2
+    assert second.input_tokens == 2000
+    assert second.output_tokens == 400
+    assert second.max_model_calls == 12
+    assert second.elapsed_seconds >= first.elapsed_seconds - 0.1
+
+    second.start_attempt()
+    assert second.attempts == 2
+
+
+def test_the_attempt_ceiling_now_actually_binds():
+    from omnibridge.agent.budget import BudgetExceeded, RequestBudget
+
+    budget = RequestBudget(max_attempts=3)
+    for _ in range(3):
+        budget = RequestBudget.restore(budget.as_dict())
+        budget.start_attempt()
+
+    budget = RequestBudget.restore(budget.as_dict())
+    with pytest.raises(BudgetExceeded):
+        budget.start_attempt()

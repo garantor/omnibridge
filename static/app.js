@@ -403,6 +403,21 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ------------------------------------------------------- terminal outcomes
 
+  function renderMissingPrerequisite(data) {
+    return `
+      <div class="verdict verdict-amber">
+        <h3>A required step is missing</h3>
+        <p>${esc(data.error)}</p>
+        <p class="subtitle">
+          The route itself is very likely correct — it was found, its router verified
+          on chain, and it simulated as far as the token transfer. What is absent is a
+          preceding transaction this pipeline does not yet build. Nothing was sent, and
+          discovery was <em>not</em> retried: the route is not what failed.
+        </p>
+      </div>
+      ${renderTelemetryCards(data.traces, data)}`;
+  }
+
   function renderConfigError(data) {
     return `
       <div class="verdict verdict-rose">
@@ -625,6 +640,8 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
           outputSection.innerHTML = `<div class="verdict verdict-amber"><h3>Rejected</h3><p>Nothing was signed and nothing was broadcast.</p></div>`;
           resetPipeline();
         });
+      } else if (data.status === "MISSING_PREREQUISITE") {
+        outputSection.innerHTML = renderMissingPrerequisite(data);
       } else if (data.status === "CONFIG_ERROR") {
         outputSection.innerHTML = renderConfigError(data);
       } else if (data.status === "NO_ROUTE_FOUND") {

@@ -126,10 +126,19 @@ def selector_for(function_signature: str) -> str:
     return "0x" + Web3.keccak(text=function_signature)[:4].hex()
 
 
-def registrable_domain(url: str) -> str:
-    """Host of a URL, lowercased and without a leading www."""
+def registrable_domain(value: str) -> str:
+    """
+    Host of a URL, lowercased and without a leading www.
+
+    Accepts a bare hostname too. Grounding metadata reports a `domain` field with no
+    scheme, and urlparse puts a scheme-less string in `path`, returning no hostname at
+    all — so every such value compared as the empty string and matched nothing.
+    """
+    if not value:
+        return ""
     try:
-        host = (urlparse(url).hostname or "").lower()
+        parsed = urlparse(value if "//" in value else f"//{value}")
+        host = (parsed.hostname or "").lower()
     except Exception:
         return ""
     return host[4:] if host.startswith("www.") else host

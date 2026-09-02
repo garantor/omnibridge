@@ -11,7 +11,7 @@ estimate_gas are read-only and spend nothing on chain.
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 class BudgetExceeded(RuntimeError):
@@ -89,6 +89,30 @@ class RequestBudget:
             raise BudgetExceeded(
                 f"Wall-clock ceiling reached ({self.elapsed_seconds:.0f}s)."
             )
+
+    @classmethod
+    def restore(cls, snapshot: Optional[Dict[str, Any]]) -> "RequestBudget":
+        """
+        Rebuild a budget from `as_dict`, counters included.
+
+        The caller used to restore only `limits`, so every retry began at zero: the
+        attempt counter never reached max_attempts, and a ceiling of 12 model calls
+        became 12 *per attempt* rather than 12 per request. Three retries could
+        therefore spend 36 calls under a budget that claimed to cap them at 12 —
+        which is the opposite of what a ceiling is for.
+        """
+        snapshot = snapshot or {}
+        budget = cls(**(snapshot.get("limits") or {}))
+        budget.attempts = int(snapshot.get("attempts") or 0)
+        budget.model_calls = int(snapshot.get("model_calls") or 0)
+        budget.input_tokens = int(snapshot.get("input_tokens") or 0)
+        budget.output_tokens = int(snapshot.get("output_tokens") or 0)
+        budget.cache_read_tokens = int(snapshot.get("cache_read_tokens") or 0)
+        # Wall-clock is a property of the request, not of this attempt, so the clock is
+        # wound back rather than restarted.
+        elapsed = float(snapshot.get("elapsed_seconds") or 0.0)
+        budget.started_at = time.monotonic() - elapsed
+        return budget
 
     def as_dict(self) -> Dict[str, Any]:
         return {

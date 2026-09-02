@@ -224,9 +224,14 @@ class GeminiDiscoveryAgent(DiscoveryProvider):
             meta = getattr(candidate, "grounding_metadata", None)
             for chunk in getattr(meta, "grounding_chunks", None) or []:
                 web = getattr(chunk, "web", None)
-                uri = getattr(web, "uri", None) or getattr(web, "domain", None)
-                if uri:
-                    urls.append(uri)
+                # `domain` first, deliberately. `uri` is a
+                # vertexaisearch.cloud.google.com/grounding-api-redirect/... link, so
+                # comparing it against a cited docs.circle.com URL never matches and
+                # marked every citation "never fetched" — noise where the signal
+                # should be, which is worse than no check at all.
+                where = getattr(web, "domain", None) or getattr(web, "uri", None)
+                if where:
+                    urls.append(where)
         return urls
 
     def _generate(

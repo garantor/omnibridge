@@ -335,7 +335,8 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
         fastest_rpc = rpc_mgr.get_fastest_rpc_sync(intent.source_chain)
     log.value("fastest RPC", fastest_rpc)
 
-    budget = RequestBudget(**(state.get("budget") or {}).get("limits", {}))
+    # Counters carry across retries, not just the limits — see RequestBudget.restore.
+    budget = RequestBudget.restore(state.get("budget"))
     agent_trace: Dict[str, Any] = {}
 
     try:
@@ -478,9 +479,44 @@ def route_after_discovery(state: GraphState) -> str:
     Nothing downstream improves on either: the first is a correct answer, and the
     second will fail identically on every retry against the same credentials.
     """
-    if state.get("status") in ("NO_ROUTE_FOUND", "CONFIG_ERROR"):
+    if state.get("status") in ("NO_ROUTE_FOUND", "CONFIG_ERROR", "MISSING_PREREQUISITE"):
         return "error_node"
     return "code_builder_node"
+
+
+# Reverts that say a prerequisite is missing, not that the route is wrong.
+#
+# An allowance revert means the router was never approved to move the token — a step
+# this pipeline does not yet perform at all. Retrying it sends a correct route back to
+# discovery with "do not repeat the same router and arguments", so the only way for the
+# model to comply is to invent a different answer. Observed doing exactly that:
+# V1 -> V2 -> V1, with a freshly confabulated reason each time, because the model cannot
+# observe allowance state and we asked it to explain a failure it had no access to.
+_PREREQUISITE_REVERTS = (
+    "exceeds allowance",
+    "insufficient allowance",
+    "transfer amount exceeds balance",
+    "insufficient balance",
+    "erc20: transfer amount exceeds",
+)
+
+
+def _missing_prerequisite(reason: str) -> Optional[str]:
+    """Name the missing step a revert points at, or None if it is a routing failure."""
+    lowered = (reason or "").lower()
+    if any(marker in lowered for marker in ("exceeds allowance", "insufficient allowance")):
+        return (
+            "The router has no allowance to move this token. An ERC-20 bridge needs two "
+            "transactions — approve(router, amount) on the token contract, then the bridge "
+            "call — and this pipeline only builds the second. The route itself simulated as "
+            "far as the transfer, so it is very likely correct."
+        )
+    if any(marker in lowered for marker in ("exceeds balance", "insufficient balance")):
+        return (
+            "The sender does not hold enough of this token. Nothing about the route is "
+            "wrong; retrying would reach the same result."
+        )
+    return None
 
 
 def route_after_error(state: GraphState) -> str:
@@ -880,10 +916,15 @@ def error_node(state: GraphState) -> Dict[str, Any]:
     """
     sim = state.get("simulation_result") or {}
     reason = state.get("error") or sim.get("revert_reason")
+    # A missing prerequisite is not a routing error, so it never goes round the retry
+    # edge. Three attempts against the same allowance revert cost ~170s of model time
+    # and produced three contradictory explanations of a failure the model could not see.
+    prerequisite = _missing_prerequisite(reason or "")
     retryable = (
         sim.get("status") in ("REVERTED", "UNAVAILABLE")
         and bool(reason)
         and state.get("status") != "NO_ROUTE_FOUND"
+        and prerequisite is None
     )
 
     # Demote before patching. If this run replayed a cached skill and it failed, the
@@ -936,6 +977,7 @@ def error_node(state: GraphState) -> Dict[str, Any]:
     traces["step_error"] = {
         "title": "Diagnostic",
         "error": reason,
+        "missing_prerequisite": prerequisite,
         "simulation_status": sim.get("status"),
         "retry_count": state.get("retry_count", 0),
         "will_retry": failure_context is not None,
@@ -947,12 +989,23 @@ def error_node(state: GraphState) -> Dict[str, Any]:
         }],
     }
 
+    if prerequisite:
+        # Report what is actually missing. "The circuit breaker held" is true and
+        # useless; the user needs to know the route was fine and a step is absent.
+        return {
+            "status": "MISSING_PREREQUISITE",
+            "error": prerequisite,
+            "failure_context": None,
+            "retry_count": state.get("retry_count", 0),
+            "traces": traces,
+        }
+
     return {
         # A no-route keeps its own name through the diagnostic. Flattening every
         # outcome to ERROR forced callers to pattern-match the message to tell "no
         # bridge exists for this pair" from "the bridge rejected this transaction".
         "status": state["status"]
-        if state.get("status") in ("NO_ROUTE_FOUND", "CONFIG_ERROR")
+        if state.get("status") in ("NO_ROUTE_FOUND", "CONFIG_ERROR", "MISSING_PREREQUISITE")
         else "ERROR",
         "error": reason or "Unknown execution error occurred",
         "failure_context": failure_context,
