@@ -312,3 +312,62 @@ def test_kill_switch_forces_the_static_path(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
     monkeypatch.setenv("OMNIBRIDGE_DISABLE_AGENT", "1")
     assert graph._run_discovery_agent({"target_chain": "arbitrum"}, INTENT) is None
+
+
+# ------------------------------------------------------------- workspace / config
+
+def test_an_identity_linked_key_sends_its_workspace(monkeypatch):
+    """
+    An identity-linked API key is not scoped to one workspace, so the API cannot infer
+    which one a request acts in and refuses the call outright. The id is configuration,
+    not a secret, and not derivable from the key.
+    """
+    monkeypatch.setenv("OMNIBRIDGE_WORKSPACE_ID", "wrkspc_test123")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+
+    agent = DiscoveryAgent()
+    assert agent.workspace_id == "wrkspc_test123"
+    assert agent.client._custom_headers["anthropic-workspace-id"] == "wrkspc_test123"
+
+
+def test_a_plain_key_sends_no_workspace_header(monkeypatch):
+    """A key scoped to one workspace needs none of this and must not be given one."""
+    monkeypatch.delenv("OMNIBRIDGE_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-a-real-key")
+
+    agent = DiscoveryAgent()
+    assert agent.workspace_id is None
+    assert "anthropic-workspace-id" not in (agent.client._custom_headers or {})
+
+
+def test_a_credentials_failure_is_not_reported_as_a_missing_route(monkeypatch):
+    """
+    A refused API call used to surface as a bare exception message, which read from the
+    frontend like "this bridge does not exist". It is a configuration problem, it is
+    terminal, and retrying it against the same credentials reaches the same answer.
+    """
+    import graph as g
+
+    for marker in (
+        "anthropic-workspace-id is required when authenticating with an identity-linked API key",
+        "authentication_error: invalid x-api-key",
+        "Your credit balance is too low",
+    ):
+        assert g._is_configuration_error(marker)
+
+    assert not g._is_configuration_error("execution reverted: ERC20 transfer failed")
+    assert not g._is_configuration_error("No verified skill covers USDC from base to stellar")
+
+    # Terminal, and never routed back into discovery.
+    assert g.route_after_discovery({"status": "CONFIG_ERROR"}) == "error_node"
+    out = g.error_node({
+        "status": "CONFIG_ERROR",
+        "error": "anthropic-workspace-id is required",
+        "simulation_result": {},
+        "traces": {},
+        "retry_count": 0,
+    })
+    assert out["status"] == "CONFIG_ERROR"
+    assert out["failure_context"] is None
+    assert g.route_after_error({**out}) == "__end__"

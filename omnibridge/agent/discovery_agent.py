@@ -211,6 +211,22 @@ Work by searching documentation, fetching the pages that look authoritative, and
 the ABI. Then call exactly one of propose_route or no_route_found."""
 
 
+def workspace_from_env() -> Optional[str]:
+    """
+    The workspace an identity-linked key acts in, if one is configured.
+
+    An identity-linked API key is not scoped to a single workspace, so the API cannot
+    infer which one a request belongs to and rejects the call outright:
+    "anthropic-workspace-id is required when authenticating with an identity-linked
+    API key". A plain key needs none of this and is unaffected.
+    """
+    return (
+        os.environ.get("OMNIBRIDGE_WORKSPACE_ID")
+        or os.environ.get("ANTHROPIC_WORKSPACE_ID")
+        or None
+    )
+
+
 class DiscoveryAgent:
     """Bounded tool loop over Claude, returning one route proposal or an honest refusal."""
 
@@ -222,8 +238,14 @@ class DiscoveryAgent:
         max_tokens: int = 16000,
         effort: str = "high",
         use_fallbacks: bool = True,
+        workspace_id: Optional[str] = None,
     ):
         self._client = client
+        # Identity-linked API keys must say which workspace a request acts in, or the
+        # API refuses it. Not a secret and not derivable from the key, so it is
+        # configuration: OMNIBRIDGE_WORKSPACE_ID, or ANTHROPIC_WORKSPACE_ID if that is
+        # already set in the environment.
+        self.workspace_id = workspace_id or workspace_from_env()
         self.model = model
         self.domains = domains if domains is not None else allowed_domains()
         self.max_tokens = max_tokens
@@ -237,7 +259,10 @@ class DiscoveryAgent:
         if self._client is None:
             import anthropic
 
-            self._client = anthropic.Anthropic()
+            headers = (
+                {"anthropic-workspace-id": self.workspace_id} if self.workspace_id else None
+            )
+            self._client = anthropic.Anthropic(default_headers=headers)
         return self._client
 
     def _tools(self) -> List[Dict[str, Any]]:

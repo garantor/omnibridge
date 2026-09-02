@@ -256,6 +256,23 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
     }
 
 
+# Substrings that mark a credentials or account problem rather than a routing one.
+# Matched on the message because the SDK raises the same exception class for both.
+_CONFIG_ERROR_MARKERS = (
+    "anthropic-workspace-id",
+    "authentication_error",
+    "invalid x-api-key",
+    "permission_error",
+    "credit balance",
+    "rate_limit_error",
+)
+
+
+def _is_configuration_error(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _CONFIG_ERROR_MARKERS)
+
+
 def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict[str, Any]]:
     """
     Tier 1 discovery: let the model establish the route, then check and encode it here.
@@ -316,6 +333,26 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
             "budget": budget.as_dict(),
             "traces": traces,
         }
+    except Exception as exc:
+        # A misconfigured client is not a routing answer. Reported as CONFIG_ERROR so
+        # the page says "fix your credentials" rather than "no bridge exists", which is
+        # what a bare exception message looked like from the frontend.
+        detail = str(exc)
+        if _is_configuration_error(detail):
+            traces = state.get("traces", {})
+            traces["step_2_discovery"] = {
+                "title": "Route & Contract Discovery (agent)",
+                "source_type": "AGENT_CONFIG_ERROR",
+                "outcome": "CONFIG_ERROR",
+                "reason": detail,
+                "status": "FAILED",
+            }
+            return {
+                "status": "CONFIG_ERROR",
+                "error": detail,
+                "traces": traces,
+            }
+        raise
 
     w3 = None
     try:
@@ -373,8 +410,13 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
 
 
 def route_after_discovery(state: GraphState) -> str:
-    """NO_ROUTE_FOUND ends the run. There is nothing downstream that can improve on it."""
-    if state.get("status") == "NO_ROUTE_FOUND":
+    """
+    NO_ROUTE_FOUND and CONFIG_ERROR both end the run.
+
+    Nothing downstream improves on either: the first is a correct answer, and the
+    second will fail identically on every retry against the same credentials.
+    """
+    if state.get("status") in ("NO_ROUTE_FOUND", "CONFIG_ERROR"):
         return "error_node"
     return "code_builder_node"
 
@@ -812,7 +854,7 @@ def error_node(state: GraphState) -> Dict[str, Any]:
     root_cause = next(
         (a for a in previous.get("attempts", []) if a.get("simulation_status")), None
     )
-    if root_cause and state.get("status") == "NO_ROUTE_FOUND":
+    if root_cause and state.get("status") in ("NO_ROUTE_FOUND", "CONFIG_ERROR"):
         reason = (
             f"{root_cause['error']} "
             f"(after this failed, the cached route was retired, so the retry found "
@@ -836,7 +878,9 @@ def error_node(state: GraphState) -> Dict[str, Any]:
         # A no-route keeps its own name through the diagnostic. Flattening every
         # outcome to ERROR forced callers to pattern-match the message to tell "no
         # bridge exists for this pair" from "the bridge rejected this transaction".
-        "status": "NO_ROUTE_FOUND" if state.get("status") == "NO_ROUTE_FOUND" else "ERROR",
+        "status": state["status"]
+        if state.get("status") in ("NO_ROUTE_FOUND", "CONFIG_ERROR")
+        else "ERROR",
         "error": reason or "Unknown execution error occurred",
         "failure_context": failure_context,
         "retry_count": state.get("retry_count", 0) + (1 if failure_context else 0),

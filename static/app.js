@@ -403,6 +403,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ------------------------------------------------------- terminal outcomes
 
+  function renderConfigError(data) {
+    return `
+      <div class="verdict verdict-rose">
+        <h3>Agent not configured</h3>
+        <p>${esc(data.error)}</p>
+        <p class="subtitle">
+          This is a credentials problem, not a routing one — the request reached
+          Anthropic and was refused. An identity-linked API key must name the workspace
+          it acts in:
+        </p>
+        <pre class="code-box">export ANTHROPIC_API_KEY=sk-ant-...
+export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre>
+        <p class="subtitle">Restart the server after setting it. Nothing was sent on-chain.</p>
+      </div>
+      ${renderTelemetryCards(data.traces, data)}`;
+  }
+
   function renderNoRoute(data) {
     return `
       <div class="verdict verdict-amber">
@@ -608,6 +625,8 @@ document.addEventListener("DOMContentLoaded", () => {
           outputSection.innerHTML = `<div class="verdict verdict-amber"><h3>Rejected</h3><p>Nothing was signed and nothing was broadcast.</p></div>`;
           resetPipeline();
         });
+      } else if (data.status === "CONFIG_ERROR") {
+        outputSection.innerHTML = renderConfigError(data);
       } else if (data.status === "NO_ROUTE_FOUND") {
         outputSection.innerHTML = renderNoRoute(data);
       } else {

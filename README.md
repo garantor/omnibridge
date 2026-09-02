@@ -31,10 +31,16 @@ To exercise the discovery path:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
+export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # identity-linked keys only, see below
 python -m pytest tests/test_agent_discovery.py -k live   # live smoke test, skips without a key
 ```
 
-`OMNIBRIDGE_DISABLE_AGENT=1` forces the cache-only path.
+| Variable | Purpose |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | Enables runtime route discovery. Without it the system is cache-only |
+| `OMNIBRIDGE_WORKSPACE_ID` | Required **only** for identity-linked API keys, which are not scoped to one workspace and so cannot infer which one a request acts in. Without it the API refuses the call: *"anthropic-workspace-id is required…"*. A plain key needs nothing here. `ANTHROPIC_WORKSPACE_ID` is also read |
+| `OMNIBRIDGE_DISABLE_AGENT=1` | Forces the cache-only path |
+| `OMNIBRIDGE_MAX_RETRIES` | Discovery retry ceiling (default 3) |
 
 ---
 
