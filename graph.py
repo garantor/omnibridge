@@ -46,6 +46,9 @@ class GraphState(TypedDict):
     # Set when this run replayed a cached skill, so a failure can demote that skill
     # rather than a fresh discovery silently overwriting it.
     replayed_skill: Optional[str]
+    # The ordered transactions this transfer needs. A single-transaction
+    # transfer is a plan of length one, so there is no second code path.
+    plan: Optional[Dict[str, Any]]
 
 
 # Bounded by plan 3.4. Three attempts, then the run ends.
@@ -534,6 +537,21 @@ def route_after_error(state: GraphState) -> str:
     return "discovery_node"
 
 
+def _verified_web3(rpc_url: Optional[str], expected_chain_id: int):
+    """A Web3 whose node confirmed the chain we expect, or None."""
+    if not rpc_url:
+        return None
+    try:
+        from web3 import Web3
+
+        candidate = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 15}))
+        if candidate.is_connected() and int(candidate.eth.chain_id) == int(expected_chain_id):
+            return candidate
+    except Exception:
+        pass
+    return None
+
+
 # --- NODE 3: In-Transit Code Builder ---
 def code_builder_node(state: GraphState) -> Dict[str, Any]:
     from rich.console import Console
@@ -588,8 +606,39 @@ def code_builder_node(state: GraphState) -> Dict[str, Any]:
         "status": "COMPLETED",
     }
 
+    # Build the ordered steps. Most ERC-20 bridges need an approval first; whether one
+    # is actually required is read off chain rather than taken from the model.
+    from omnibridge.core.planner import PrerequisiteUnsatisfiable, build_plan
+    from omnibridge.steplog import StepLogger
+
+    plog = StepLogger("plan")
+    src_info = rpc_mgr.discover_chain_metadata(state["source_chain"])
+    w3 = _verified_web3(state.get("active_rpc"), src_info.chain_id)
+    spend = (quote.extra_params or {}).get("spend")
+    plan_notes: list = []
+
+    try:
+        plan = build_plan(
+            quote, intent, state["user_address"], calldata, src_info.chain_id,
+            w3=w3, spend=spend, notes=plan_notes,
+        )
+    except PrerequisiteUnsatisfiable as exc:
+        plog.fail(str(exc))
+        traces["step_3_codegen"]["status"] = "FAILED"
+        return {"status": "MISSING_PREREQUISITE", "error": str(exc), "traces": traces}
+
+    for note in plan_notes:
+        plog.warn(note)
+    plog.step(f"{len(plan.steps)} transaction(s) to sign")
+    for step in plan.steps:
+        plog.value(f"  step {step.index + 1} ({step.kind})", step.title)
+
+    traces["step_3_codegen"]["plan"] = [s.model_dump() for s in plan.steps]
+    traces["step_3_codegen"]["plan_notes"] = plan_notes
+
     return {
         "unsigned_transaction_hex": calldata,
+        "plan": plan.model_dump(),
         "status": "PAYLOAD_BUILT",
         "traces": traces,
     }
@@ -616,13 +665,37 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
     rpc_candidates = [rpc_url] + [u for u in src_info.rpc_urls if u != rpc_url]
     sim = Simulator(rpc_candidates, expected_chain_id=src_info.chain_id)
 
-    with log.timed("simulate"):
-        sim_res = sim.simulate_call(
-            from_address=state["user_address"],
-            to_address=state["route"]["router_address"],
-            calldata=state["unsigned_transaction_hex"],
-            value_wei=0,
-        )
+    # Simulate the first unsigned step of the plan, not "the transaction". Where an
+    # approval comes first, that is what gets verified now; the bridge call is checked
+    # again after the approval lands, because before then its revert is guaranteed and
+    # says nothing about whether the route is right.
+    from omnibridge.core.models import ExecutionPlan
+    from omnibridge.core.planner import simulate_next
+
+    plan = ExecutionPlan(**state["plan"]) if state.get("plan") else None
+    plan_out = None
+
+    if plan is not None and any(st.tx_hash is None for st in plan.steps):
+        pending = [st for st in plan.steps if st.tx_hash is None][0]
+        log.value("step", f"{pending.index + 1} of {len(plan.steps)} — {pending.kind}")
+        with log.timed(f"simulate {pending.kind}"):
+            plan, sim_res, _ = simulate_next(plan, sim, state["user_address"])
+        plan_out = plan.model_dump()
+        for later in plan.steps:
+            if later.status.value == "PENDING_PREREQUISITE":
+                log.value(
+                    f"  step {later.index + 1} ({later.kind})",
+                    "not checked yet — re-simulated after the step before it lands",
+                )
+    else:
+        with log.timed("simulate"):
+            sim_res = sim.simulate_call(
+                from_address=state["user_address"],
+                to_address=state["route"]["router_address"],
+                calldata=state["unsigned_transaction_hex"],
+                value_wei=0,
+            )
+
     if sim_res.success:
         log.ok(f"VERIFIED on chain {sim_res.simulated_on_chain_id}, {sim_res.gas_used} gas")
     else:
@@ -666,6 +739,7 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
 
     return {
         "simulation_result": sim_res.model_dump(),
+        "plan": plan_out if plan_out is not None else state.get("plan"),
         "estimated_gas_usd": sim_res.estimated_gas_cost_usd or 0.0,
         "status": "SIMULATION_PASSED" if sim_res.success else "SIMULATION_FAILED",
         "error": sim_res.revert_reason if not sim_res.success else None,
@@ -768,6 +842,9 @@ def hitl_gate_node(state: GraphState) -> Dict[str, Any]:
             ),
         },
         "unsigned_transaction_hex": calldata,
+        # The ordered transactions. A single-transaction transfer is a plan of one, so
+        # the browser has one code path rather than a special case.
+        "plan": state.get("plan"),
         "estimated_gas_usd": state["estimated_gas_usd"],
         "slippage": state["slippage"],
         "agent_evidence": state.get("agent_evidence"),

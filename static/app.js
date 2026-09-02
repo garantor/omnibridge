@@ -502,6 +502,45 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
       </div>`;
   }
 
+  const STEP_STATE = {
+    VERIFIED: { icon: "✓", cls: "step-ok", label: "verified against a live node" },
+    REVERTED: { icon: "✗", cls: "step-bad", label: "reverted in simulation" },
+    UNAVAILABLE: { icon: "!", cls: "step-warn", label: "could not be checked" },
+    UNSUPPORTED: { icon: "!", cls: "step-warn", label: "no simulation path" },
+    PENDING_PREREQUISITE: {
+      icon: "…", cls: "step-pending",
+      label: "not checked yet — verified after the step before it lands",
+    },
+  };
+
+  function renderPlan(plan) {
+    if (!plan || !plan.steps || plan.steps.length < 2) return "";
+    return `
+      <div class="plan">
+        <div class="plan-head">${plan.steps.length} transactions to sign, in order</div>
+        ${plan.steps.map((st) => {
+          const s = STEP_STATE[st.status] || STEP_STATE.UNAVAILABLE;
+          const done = st.tx_hash ? " step-done" : "";
+          return `
+            <div class="plan-step ${s.cls}${done}">
+              <div class="plan-step-head">
+                <span class="plan-step-n">${st.index + 1}</span>
+                <span class="plan-step-title">${esc(st.title)}</span>
+                <span class="plan-step-state">${s.icon} ${st.tx_hash ? "signed" : esc(s.label)}</span>
+              </div>
+              <div class="plan-step-body">${esc(st.description)}</div>
+              ${st.kind === "approve" ? `
+                <div class="plan-step-body">
+                  <strong>Token:</strong> <code>${esc(st.token_address)}</code><br>
+                  <strong>Spender:</strong> <code>${esc(st.spender_address)}</code>
+                </div>` : ""}
+              ${st.revert_reason ? `<pre class="code-box code-error">${esc(st.revert_reason)}</pre>` : ""}
+              ${st.gas_used ? `<div class="plan-step-body"><span class="muted">${st.gas_used} gas</span></div>` : ""}
+            </div>`;
+        }).join("")}
+      </div>`;
+  }
+
   function renderApproval(data) {
     const v = simVerdict(data.verification && data.verification.simulation_status);
     const route = data.route || {};
@@ -517,6 +556,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
         </div>
 
         ${renderAmountCheck(amount)}
+        ${renderPlan(data.plan)}
 
         <div class="manifest-grid">
           <div class="manifest-item"><div class="manifest-label">Route</div><div class="manifest-val">${esc(route.source)} ➔ ${esc(route.target)}</div></div>
@@ -532,7 +572,11 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
 
         <div class="manifest-actions">
           <button id="confirm-sign-btn" class="btn ${blocked ? "btn-danger" : "btn-success"}" ${blocked ? "disabled" : ""}>
-            <span>${blocked ? "Blocked — amount does not match" : "Sign in Wallet & Broadcast"}</span>
+            <span>${blocked
+              ? "Blocked — amount does not match"
+              : (currentPlan && currentPlan.steps.length > 1
+                  ? `Sign step 1 of ${currentPlan.steps.length}: ${nextPlanStep(currentPlan) ? nextPlanStep(currentPlan).title : ""}`
+                  : "Sign in Wallet & Broadcast")}</span>
             <span>${blocked ? "⛔" : "🚀"}</span>
           </button>
           <button id="cancel-btn" class="btn btn-secondary">Reject</button>
@@ -573,6 +617,11 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
 
   let currentAmount = null;
   let currentSourceChainId = null;
+  let currentPlan = null;
+
+  function nextPlanStep(plan) {
+    return plan && plan.steps ? plan.steps.find((s) => !s.tx_hash) : null;
+  }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -633,6 +682,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
         currentRouterAddress = data.route.router_address;
         currentSourceChainId = data.route.source_chain_id;
         currentAmount = data.amount;
+        currentPlan = data.plan || null;
 
         outputSection.innerHTML = renderApproval(data);
         document.getElementById("confirm-sign-btn").addEventListener("click", handleBlocknativeSignAndBroadcast);
@@ -692,19 +742,81 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
     signBtn.innerHTML = `<span>Awaiting signature in ${esc(primaryWallet.label || "your wallet")}…</span>`;
     setStepActive(6);
 
+    // Walk the plan in order. Each step is signed only after being simulated against
+    // the chain as it is *now* — the bridge call cannot be checked before its approval
+    // lands, so it is checked between the two signatures rather than optimistically
+    // before either.
+    const steps = (currentPlan && currentPlan.steps) || [
+      { index: 0, kind: "bridge", title: "Bridge", to: currentRouterAddress,
+        data: currentUnsignedHex, value_wei: 0, status: "VERIFIED", tx_hash: null },
+    ];
+
     let realTxHash = null;
-    try {
-      realTxHash = await provider.request({
-        method: "eth_sendTransaction",
-        params: [{ from: fromAddress, to: currentRouterAddress, data: currentUnsignedHex, value: "0x0" }],
-      });
-    } catch (walletErr) {
-      signBtn.disabled = false;
-      signBtn.innerHTML = `<span>Sign in Wallet & Broadcast</span><span>🚀</span>`;
-      setStepActive(5);
-      outputSection.insertAdjacentHTML("afterbegin",
-        `<div class="banner banner-rose"><strong>Not signed:</strong> ${esc(walletErr.message || "cancelled in wallet")}. Nothing was broadcast.</div>`);
-      return;
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      if (step.tx_hash) continue;
+
+      if (step.status !== "VERIFIED") {
+        signBtn.disabled = false;
+        outputSection.insertAdjacentHTML("afterbegin",
+          `<div class="banner banner-rose"><strong>Not signable:</strong> step ${step.index + 1}
+           (${esc(step.title)}) is ${esc(step.status)}${step.revert_reason ? " — " + esc(step.revert_reason) : ""}.
+           Nothing further was sent.</div>`);
+        return;
+      }
+
+      signBtn.innerHTML = `<span>Step ${step.index + 1} of ${steps.length} — awaiting signature in ${esc(primaryWallet.label || "your wallet")}…</span>`;
+
+      let hash;
+      try {
+        hash = await provider.request({
+          method: "eth_sendTransaction",
+          params: [{ from: fromAddress, to: step.to, data: step.data,
+                     value: "0x" + Number(step.value_wei || 0).toString(16) }],
+        });
+      } catch (walletErr) {
+        signBtn.disabled = false;
+        signBtn.innerHTML = `<span>Sign in Wallet & Broadcast</span><span>🚀</span>`;
+        setStepActive(5);
+        const done = steps.filter((s2) => s2.tx_hash).length;
+        outputSection.insertAdjacentHTML("afterbegin",
+          `<div class="banner banner-rose"><strong>Not signed:</strong>
+           ${esc(walletErr.message || "cancelled in wallet")}.
+           ${done ? `Step${done > 1 ? "s" : ""} 1–${done} already went through; the transfer is incomplete.`
+                  : "Nothing was broadcast."}</div>`);
+        return;
+      }
+
+      step.tx_hash = hash;
+      realTxHash = hash;
+
+      // Not the last step: tell the server, and let it verify the next one against
+      // live state before we ask for another signature.
+      if (i < steps.length - 1) {
+        signBtn.innerHTML = `<span>Step ${step.index + 1} sent — verifying the next against the chain…</span>`;
+        try {
+          const adv = await fetch("/api/bridge/advance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ thread_id: currentThreadId, step_index: step.index, tx_hash: hash }),
+          });
+          if (!adv.ok) throw new Error((await adv.json().catch(() => ({}))).detail || `server ${adv.status}`);
+          const advData = await adv.json();
+          currentPlan = advData.plan;
+          steps.splice(0, steps.length, ...advData.plan.steps);
+        } catch (err) {
+          outputSection.innerHTML = `
+            <div class="verdict verdict-rose">
+              <h3>Could not verify the next step</h3>
+              <p>${esc(err.message)}</p>
+              <p class="subtitle">Step ${step.index + 1} was signed as <code>${esc(hash)}</code>.
+                 The remaining steps were not sent, so the transfer is incomplete —
+                 check that transaction on-chain before retrying.</p>
+            </div>`;
+          return;
+        }
+      }
     }
 
     try {

@@ -87,6 +87,28 @@ class ProviderUnavailable(Exception):
 
 
 @dataclass
+class TokenSpend:
+    """
+    The ERC-20 the router must be allowed to move, if any.
+
+    Which token a bridge spends is protocol knowledge, so the model declares it; the
+    approval itself is built by reviewed code from the standard ABI. `spender` is
+    usually the router, but not always — some protocols take allowance on a separate
+    contract, and guessing wrong produces a transaction that reverts after the user has
+    already paid for an approval.
+
+    A native-asset transfer has no spend at all, which is why this is optional.
+    """
+
+    token: str
+    spender: str
+    amount: str
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"token": self.token, "spender": self.spender, "amount": self.amount}
+
+
+@dataclass
 class RouteProposal:
     """What the model is allowed to decide. Everything else is computed from it."""
 
@@ -99,6 +121,8 @@ class RouteProposal:
     dest_chain_ref: Dict[str, Any]
     sources: List[str]
     rationale: str
+    #: The ERC-20 approval this route needs before it can run, if any.
+    spend: Optional[TokenSpend] = None
     #: URLs the provider's search really fetched, when the provider can report them.
     #: Distinct from `sources`, which is what the model says it used — the two differ,
     #: and only the first is evidence that anything was read.
@@ -116,6 +140,7 @@ class RouteProposal:
             "dest_chain_ref": self.dest_chain_ref,
             "sources": list(self.sources),
             "rationale": self.rationale,
+            "spend": self.spend.as_dict() if self.spend else None,
         }
 
     @classmethod
@@ -134,7 +159,25 @@ class RouteProposal:
                 "Refusing to default them — an unchosen value would be encoded as though "
                 "the model had picked it."
             )
+        spend_raw = payload.get("spend") or None
+        spend = None
+        if spend_raw:
+            missing_spend = [k for k in ("token", "spender", "amount") if not spend_raw.get(k)]
+            if missing_spend:
+                raise ValueError(
+                    "Route proposal declares a token spend but omits "
+                    f"{', '.join(missing_spend)}. An approval built from a guessed "
+                    "spender or amount is a transaction the user pays for and that "
+                    "does not unblock the transfer."
+                )
+            spend = TokenSpend(
+                token=str(spend_raw["token"]),
+                spender=str(spend_raw["spender"]),
+                amount=str(spend_raw["amount"]),
+            )
+
         return cls(
+            spend=spend,
             protocol=str(payload["protocol"]),
             router_address=str(payload["router_address"]),
             function_signature=str(payload["function_signature"]),
@@ -217,6 +260,35 @@ PROPOSE_ROUTE_SCHEMA: Dict[str, Any] = {
         "rationale": {
             "type": "string",
             "description": "Why this route, in a few sentences. Shown to the human who approves it.",
+        },
+        "spend": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": (
+                "The ERC-20 approval this route needs before the call can succeed. "
+                "Almost every ERC-20 bridge needs one: the router calls transferFrom, "
+                "which fails unless the sender has approved it first. Omit this ONLY "
+                "for a native-asset transfer where no token is pulled."
+            ),
+            "properties": {
+                "token": {
+                    "type": "string",
+                    "description": "ERC-20 contract whose balance the router will move, on the source chain.",
+                },
+                "spender": {
+                    "type": "string",
+                    "description": (
+                        "Contract that must be approved. Usually the router, but some "
+                        "protocols take allowance on a separate contract — report the "
+                        "one the documentation names, not the one you assume."
+                    ),
+                },
+                "amount": {
+                    "type": "string",
+                    "description": "Base units to approve, normally equal to the amount being transferred.",
+                },
+            },
+            "required": ["token", "spender", "amount"],
         },
     },
     "required": list(PROPOSAL_REQUIRED_FIELDS),

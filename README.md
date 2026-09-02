@@ -19,6 +19,7 @@ The pipeline, the guardrails, the memory layer and the reasoning core are built.
 | Web UI, wallet connect, in-browser signing | Working |
 | `SKILL.md` procedural memory — exact-match lookup, demote-on-failure, retained revisions | Working (repository is currently empty) |
 | Calldata encoding | Working — one generic path, driven by a signature the route carries |
+| ERC-20 approvals | Working — allowance read on chain, exact-amount approval built and simulated, signed before the bridge call |
 | Simulation & circuit breaker | Working on EVM against an identity-checked RPC; refuses (never passes) otherwise |
 | Chain-name resolution | Working — refuses ambiguous and low-similarity matches rather than guessing |
 | Reasoning core — pluggable provider (Anthropic, Gemini), provenance-checked proposals | **Built, not verified against a live API** |
@@ -163,17 +164,15 @@ Ordered by how much they matter.
 
 1. **The reasoning core has never been run against the live API.** Every model call in the test suite goes through a fake client. The control flow is genuinely covered — terminal tool calls, `pause_turn`, refusals, budget ceilings, retry bounds — but no request has ever been sent, so the request shape is unverified. Set `ANTHROPIC_API_KEY` and run the live smoke test in [`tests/test_agent_discovery.py`](tests/test_agent_discovery.py) before trusting it.
 
-2. **ERC-20 approvals are not built.** Every ERC-20 bridge needs two transactions — `approve(router, amount)` on the token, then the bridge call — and a `RouteProposal` carries exactly one function. So a correct CCTP route reverts with `ERC20: transfer amount exceeds allowance` at the simulation gate. The run now stops there and says which step is missing rather than retrying a route that was never wrong.
+2. **Non-EVM destinations halt at the simulation gate.** A Base → Stellar transfer is an ordinary Base transaction and simulates normally; a transaction *submitted to* a non-EVM chain has no `eth_call` path, so it returns `UNSUPPORTED` and the run ends. Real Soroban and Solana preflight is unbuilt, and it is the largest remaining item.
 
-3. **Non-EVM destinations halt at the simulation gate.** A Base → Stellar transfer is an ordinary Base transaction and simulates normally; a transaction *submitted to* a non-EVM chain has no `eth_call` path, so it returns `UNSUPPORTED` and the run ends. Real Soroban and Solana preflight is unbuilt, and it is the largest remaining item.
+3. **`eth_call` proves the source leg only.** No simulation can establish that funds arrive on the destination chain. The manifest says so explicitly rather than implying end-to-end verification.
 
-4. **`eth_call` proves the source leg only.** No simulation can establish that funds arrive on the destination chain. The manifest says so explicitly rather than implying end-to-end verification.
+4. **Discovery is non-deterministic.** The same intent, run twice, may yield two different valid routers. The skill cache bounds this in practice — the first verified answer becomes the cached one — but whether that is sufficient for a financial path is a product decision.
 
-5. **Discovery is non-deterministic.** The same intent, run twice, may yield two different valid routers. The skill cache bounds this in practice — the first verified answer becomes the cached one — but whether that is sufficient for a financial path is a product decision.
+5. **Cold-path cost is unmeasured.** An Opus 5 discovery run with search and fetches costs materially more than a cache hit. Skills amortise it, but the cold number is not yet known.
 
-6. **Cold-path cost is unmeasured.** An Opus 5 discovery run with search and fetches costs materially more than a cache hit. Skills amortise it, but the cold number is not yet known.
-
-7. **The CLI and the LangGraph runtime still differ on broadcast.** The CLI passes `dry_run=(private_key is None)`; the graph passes `dry_run=False`. Behaviour observed in one does not carry to the other.
+6. **The CLI and the LangGraph runtime still differ on broadcast.** The CLI passes `dry_run=(private_key is None)`; the graph passes `dry_run=False`. Behaviour observed in one does not carry to the other.
 
 ### Closed since the first revision of this file
 
@@ -191,6 +190,7 @@ Recorded because each was silently wrong rather than loudly broken — the class
 - `rpc-bench` always reported `Unknown chain`, because it read a cache that only `discover_chain_metadata()` populates.
 - `tools.py` held a LangChain tool surface — `python_repl_runner` (a bare `exec`), `eth_call_simulator`, `rpc_broadcaster`, `save_skill_tool` — that nothing ever invoked. Deleted with the module.
 - Source corroboration counted any two allowlisted hostnames, without regard for whether anything had been read — so a model citing two URLs it never opened passed, while one honestly citing a block explorer alongside the docs was refused.
+- Only one transaction was ever built, so every ERC-20 bridge reverted with `transfer amount exceeds allowance` — and the retry edge blamed a route that was correct.
 - The intent parser substituted `Unknown / 1.0 NATIVE` for anything it could not parse and reported `COMPLETED`.
 - A malformed resume payload read as `USER_APPROVED`, carrying unsigned calldata forward as though a human had signed it.
 

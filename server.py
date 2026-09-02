@@ -52,6 +52,14 @@ class ResumeBridgeRequest(BaseModel):
     signed_transaction_hex: Optional[str] = None
 
 
+class AdvanceStepRequest(BaseModel):
+    """One step of a plan has been signed; verify the next against live state."""
+
+    thread_id: str
+    step_index: int
+    tx_hash: str
+
+
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -254,6 +262,52 @@ def resume_bridge_flow(req: ResumeBridgeRequest):
         "explorer_url"
     )
     return response
+
+
+@server_app.post("/api/bridge/advance")
+def advance_plan_step(req: AdvanceStepRequest):
+    """
+    Record a signed step and simulate the next one against the chain as it now is.
+
+    This is what makes a multi-transaction plan honest. A bridge call cannot be checked
+    before its approval lands — the allowance is genuinely absent — so it is checked
+    here, after, and immediately before the user is asked to sign it. No step is ever
+    signed on the strength of a simulation run against a different chain state.
+    """
+    from omnibridge.core.models import ExecutionPlan
+    from omnibridge.core.planner import simulate_next
+    from omnibridge.core.simulator import Simulator
+    from graph import rpc_mgr
+
+    config = {"configurable": {"thread_id": req.thread_id}}
+    snapshot = graph.get_state(config)
+    values = snapshot.values or {}
+
+    raw_plan = values.get("plan")
+    if not raw_plan:
+        raise HTTPException(status_code=409, detail="This run has no multi-step plan.")
+
+    plan = ExecutionPlan(**raw_plan)
+    if not (0 <= req.step_index < len(plan.steps)):
+        raise HTTPException(status_code=400, detail=f"No step {req.step_index} in this plan.")
+
+    plan.steps[req.step_index].tx_hash = req.tx_hash
+
+    src = rpc_mgr.discover_chain_metadata(values["source_chain"])
+    rpc = values.get("active_rpc") or ""
+    candidates = [rpc] + [u for u in src.rpc_urls if u != rpc]
+    simulator = Simulator(candidates, expected_chain_id=src.chain_id)
+
+    plan, result, step = simulate_next(plan, simulator, values["user_address"])
+    graph.update_state(config, {"plan": plan.model_dump()})
+
+    return {
+        "status": "STEP_RECORDED",
+        "thread_id": req.thread_id,
+        "plan": plan.model_dump(),
+        "next_step": step.model_dump() if step else None,
+        "all_signed": all(s.tx_hash for s in plan.steps),
+    }
 
 
 @server_app.get("/api/skills")

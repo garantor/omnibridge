@@ -738,3 +738,70 @@ body {
   line-height: 1.45;
   word-break: break-word;
 }
+
+/* ---------------------------------------------------------------------------
+   Multi-step execution plans.
+
+   An ERC-20 bridge is two transactions. The states matter as much as the steps:
+   PENDING_PREREQUISITE means a step genuinely cannot be checked yet, and must
+   not be styled like a pass.
+   --------------------------------------------------------------------------- */
+
+.plan { margin: 1.25rem 0; }
+.plan-head {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 0.6rem;
+}
+.plan-step {
+  border: 1px solid var(--border-color);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.6rem;
+  background: var(--bg-secondary);
+}
+.plan-step-head {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+.plan-step-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: rgba(127, 127, 127, 0.18);
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex: none;
+}
+.plan-step-title { font-weight: 600; }
+.plan-step-state { margin-left: auto; font-size: 0.75rem; opacity: 0.9; }
+.plan-step-body {
+  margin-top: 0.45rem;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.plan-step-body code {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.9em;
+  word-break: break-all;
+}
+
+.plan-step.step-ok      { border-left-color: var(--accent-green); }
+.plan-step.step-bad     { border-left-color: var(--accent-rose); }
+.plan-step.step-warn    { border-left-color: var(--accent-amber); }
+/* Not a pass and not a failure: nothing has been checked yet. */
+.plan-step.step-pending { border-left-color: var(--border-color); opacity: 0.78; }
+.plan-step.step-done    { opacity: 0.6; }
+.plan-step.step-ok   .plan-step-state { color: #6ee7b7; }
+.plan-step.step-bad  .plan-step-state { color: #fecdd3; }
+.plan-step.step-warn .plan-step-state { color: #fcd34d; }
+.plan-step.step-pending .plan-step-state { color: var(--text-muted); }

@@ -144,3 +144,25 @@ def test_the_ui_is_never_cached():
         res = client.get(path)
         assert res.status_code == 200, path
         assert "no-store" in res.headers.get("cache-control", ""), path
+
+
+# ------------------------------------------------------------- multi-step plans
+
+def test_advancing_a_plan_on_an_unknown_thread_is_refused():
+    res = client.post("/api/bridge/advance",
+                      json={"thread_id": "nope", "step_index": 0, "tx_hash": "0x" + "ab" * 32})
+    assert res.status_code == 409
+    assert "no multi-step plan" in res.json()["detail"]
+
+
+def test_the_hitl_payload_carries_the_plan():
+    """
+    The browser signs from the plan, not from a single hex blob, so a two-transaction
+    transfer has one code path rather than a special case.
+    """
+    import inspect
+
+    import graph
+
+    source = inspect.getsource(graph.hitl_gate_node)
+    assert '"plan": state.get("plan")' in source

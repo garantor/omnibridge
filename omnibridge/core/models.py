@@ -96,6 +96,74 @@ class SimulationResult(BaseModel):
         return self.status is SimulationStatus.VERIFIED
 
 
+class StepStatus(str, Enum):
+    """
+    Whether a step in a plan has been checked, and if not, why not.
+
+    PENDING_PREREQUISITE is the one that matters. A bridge call cannot be simulated
+    before its approval lands — the allowance genuinely is not there yet — and there is
+    no honest way to report it as verified in advance. It is re-simulated against live
+    state once the approval confirms, immediately before it is signed.
+    """
+
+    VERIFIED = "VERIFIED"
+    REVERTED = "REVERTED"
+    UNAVAILABLE = "UNAVAILABLE"
+    UNSUPPORTED = "UNSUPPORTED"
+    PENDING_PREREQUISITE = "PENDING_PREREQUISITE"
+
+
+class TransactionStep(BaseModel):
+    """One transaction the user will be asked to sign."""
+
+    index: int
+    kind: str                      # "approve" | "bridge"
+    title: str
+    description: str
+    to: str
+    data: str
+    value_wei: int = 0
+    chain_id: int
+
+    status: StepStatus = StepStatus.PENDING_PREREQUISITE
+    revert_reason: Optional[str] = None
+    gas_used: Optional[int] = None
+    simulated_on_chain_id: Optional[int] = None
+
+    # For an approve: what is being granted, to whom. Rendered so the human sees the
+    # standing permission they are giving, not just a hex blob.
+    token_address: Optional[str] = None
+    spender_address: Optional[str] = None
+    amount_raw: Optional[int] = None
+    amount_decoded: Optional[float] = None
+
+    tx_hash: Optional[str] = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def signable(self) -> bool:
+        """Only a step verified against live state may be signed."""
+        return self.status is StepStatus.VERIFIED
+
+
+class ExecutionPlan(BaseModel):
+    """
+    The ordered transactions that make up one transfer.
+
+    A single-transaction transfer is a plan of length one, so there is no separate code
+    path for it — the thing that used to be `unsigned_transaction_hex` is now step 0.
+    """
+
+    steps: List[TransactionStep] = Field(default_factory=list)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ready(self) -> bool:
+        """True when the first unsigned step has been verified and can be signed."""
+        pending = [s for s in self.steps if s.tx_hash is None]
+        return bool(pending) and pending[0].signable
+
+
 class ExecutionManifest(BaseModel):
     source_chain: str
     source_chain_id: int
