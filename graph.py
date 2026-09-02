@@ -4,6 +4,7 @@ LangGraph State Machine for Headless Web3 In-Transit Bridging Engine with Full O
 
 from typing import Dict, Any, Optional, TypedDict
 import json
+import os
 import re
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -39,7 +40,15 @@ class GraphState(TypedDict):
     skill_path: Optional[str]
     error: Optional[str]
     traces: Dict[str, Any]
+    # Retry edge (plan 3.4): a revert is feedback, not a terminus.
+    retry_count: int
+    failure_context: Optional[str]
+    budget: Optional[Dict[str, Any]]
+    agent_evidence: Optional[Dict[str, Any]]
 
+
+# Bounded by plan 3.4. Three attempts, then the run ends.
+MAX_DISCOVERY_RETRIES = int(os.environ.get("OMNIBRIDGE_MAX_RETRIES", "3"))
 
 rpc_mgr = RPCManager()
 skill_mgr = SkillManager(repository_path=str(LOCAL_SKILLS_DIR))
@@ -162,8 +171,13 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
     )
 
     search_query = f"Bridge {state['asset']} from {state['source_chain']} to {state['target_chain']} official routers & RPCs"
-    
-    # Check Skill Memory
+
+    # Tier 0: a verified skill short-circuits discovery entirely.
+    # Tier 1: the reasoning core, unless the kill switch forces the static path.
+    agent_result = _run_discovery_agent(state, intent)
+    if agent_result is not None:
+        return agent_result
+
     quote = finder.discover_route(intent)
     fastest_rpc = rpc_mgr.get_fastest_rpc_sync(state["source_chain"])
     is_cached = "Skill" in quote.bridge_name or "Verified" in quote.bridge_name
@@ -217,6 +231,130 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
         "status": "ROUTE_DISCOVERED",
         "traces": traces,
     }
+
+
+def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict[str, Any]]:
+    """
+    Tier 1 discovery: let the model establish the route, then check and encode it here.
+
+    Returns None to fall through to the static path — when the kill switch is set, when
+    no credentials are configured, or when a verified skill already covers this route.
+    Raises when the agent runs but its proposal cannot be trusted, which the retry edge
+    turns into another attempt.
+    """
+    from omnibridge.agent.budget import RequestBudget
+    from omnibridge.agent.discovery_agent import DiscoveryAgent, NoRouteFound, agent_disabled
+    from omnibridge.agent.synthesis import ProposalRejected, synthesize
+
+    if agent_disabled():
+        return None
+    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+        return None
+    if skill_mgr.find_skill(intent.source_chain, intent.dest_chain, intent.token):
+        return None
+
+    from rich.console import Console
+    from rich.panel import Panel
+    _console = Console()
+
+    src_info = rpc_mgr.discover_chain_metadata(intent.source_chain, network=intent.network)
+    fastest_rpc = rpc_mgr.get_fastest_rpc_sync(intent.source_chain)
+
+    budget = RequestBudget(**(state.get("budget") or {}).get("limits", {}))
+    agent = DiscoveryAgent()
+    agent_trace: Dict[str, Any] = {}
+
+    try:
+        proposal = agent.discover(
+            intent,
+            src_info,
+            state["target_chain"],
+            budget,
+            failure_context=state.get("failure_context"),
+            trace=agent_trace,
+        )
+    except NoRouteFound as exc:
+        # A correct answer, not a failure: terminates, and is never retried.
+        traces = state.get("traces", {})
+        traces["step_2_discovery"] = {
+            "title": "Route & Contract Discovery (agent)",
+            "source_type": "AGENT_NO_ROUTE",
+            "outcome": "NO_ROUTE_FOUND",
+            "reason": exc.reason,
+            "sources": exc.sources,
+            "budget": budget.as_dict(),
+            "status": "COMPLETED",
+        }
+        raise NoRouteFound(exc.reason, exc.sources)
+
+    w3 = None
+    try:
+        from web3 import Web3
+
+        candidate = Web3(Web3.HTTPProvider(fastest_rpc, request_kwargs={"timeout": 15}))
+        if candidate.is_connected() and int(candidate.eth.chain_id) == src_info.chain_id:
+            w3 = candidate
+    except Exception:
+        w3 = None
+
+    calldata, quote, evidence = synthesize(
+        proposal, intent, src_info, w3, allowed_domains=agent.domains
+    )
+
+    _console.print(Panel(
+        f"[bold green]Protocol:[/bold green] {proposal.protocol}  [dim](agent, {budget.model_calls} model call(s))[/dim]\n"
+        f"[bold green]Router:[/bold green] [white]`{quote.router_address}`[/white]\n"
+        f"[bold green]Function:[/bold green] {proposal.function_signature}\n"
+        f"[bold green]Destination ref:[/bold green] {proposal.dest_chain_ref}\n"
+        f"[bold green]Sources:[/bold green] {', '.join(proposal.sources)}\n"
+        f"[bold green]Provenance:[/bold green] {'✓ verified on chain' if w3 is not None else '⚠ not checked (no usable RPC)'}\n"
+        f"[bold green]Rationale:[/bold green] {proposal.rationale}",
+        title="[bold green]📋 [STEP 2: AGENT-DISCOVERED ROUTE][/bold green]",
+        border_style="green",
+    ))
+
+    traces = state.get("traces", {})
+    traces["step_2_discovery"] = {
+        "title": "Route & Contract Discovery (agent)",
+        "source_type": "AGENT_RUNTIME_DISCOVERY",
+        "model": agent.model,
+        "agent_turns": agent_trace.get("turns", []),
+        "evidence": evidence,
+        "budget": budget.as_dict(),
+        "active_rpc": fastest_rpc,
+        "status": "COMPLETED",
+    }
+
+    return {
+        "route": {
+            "bridge": quote.bridge_name,
+            "router_address": quote.router_address,
+            "source_chain_id": quote.source_chain_id,
+            "dest_chain_id": quote.dest_chain_id,
+            "quote_obj": quote.model_dump(),
+        },
+        "active_rpc": fastest_rpc,
+        "unsigned_transaction_hex": calldata,
+        "status": "ROUTE_DISCOVERED",
+        "budget": budget.as_dict(),
+        "agent_evidence": evidence,
+        "traces": traces,
+    }
+
+
+def route_after_error(state: GraphState) -> str:
+    """
+    A revert is the highest-quality signal this system produces. Feed it back.
+
+    Bounded at three attempts, and only for failures another attempt could plausibly fix
+    — a NO_ROUTE_FOUND or a budget exhaustion is not retried, because retrying it just
+    spends money to reach the same answer.
+    """
+    if not state.get("failure_context"):
+        return END
+    if state.get("retry_count", 0) >= MAX_DISCOVERY_RETRIES:
+        return END
+    return "discovery_node"
 
 
 # --- NODE 3: In-Transit Code Builder ---
@@ -476,10 +614,40 @@ unsigned_hex = "{state['unsigned_transaction_hex']}"
 
 
 def error_node(state: GraphState) -> Dict[str, Any]:
+    """
+    Terminal for an unrecoverable failure, and the hinge of the retry edge.
+
+    Where the failure is one the agent could learn from — a revert, a rejected proposal —
+    it is packaged as context for another attempt rather than discarded.
+    """
+    sim = state.get("simulation_result") or {}
+    reason = state.get("error") or sim.get("revert_reason")
+    retryable = sim.get("status") in ("REVERTED", "UNAVAILABLE") and bool(reason)
+
+    failure_context = None
+    if retryable and state.get("retry_count", 0) < MAX_DISCOVERY_RETRIES:
+        route = state.get("route") or {}
+        failure_context = (
+            f"Router {route.get('router_address')} with the parameters you gave was "
+            f"rejected at simulation: {reason}. Establish what was wrong before proposing "
+            "again, and do not repeat the same router and arguments."
+        )
+
+    traces = state.get("traces", {})
+    traces["step_error"] = {
+        "title": "Diagnostic",
+        "error": reason,
+        "simulation_status": sim.get("status"),
+        "retry_count": state.get("retry_count", 0),
+        "will_retry": failure_context is not None,
+    }
+
     return {
         "status": "ERROR",
-        "error": state.get("error", "Unknown execution error occurred"),
-        "traces": state.get("traces", {}),
+        "error": reason or "Unknown execution error occurred",
+        "failure_context": failure_context,
+        "retry_count": state.get("retry_count", 0) + (1 if failure_context else 0),
+        "traces": traces,
     }
 
 
@@ -501,7 +669,9 @@ builder.add_edge("code_builder_node", "simulator_node")
 builder.add_conditional_edges("simulator_node", route_after_simulation, ["hitl_gate_node", "error_node"])
 builder.add_edge("hitl_gate_node", "broadcast_skill_node")
 builder.add_edge("broadcast_skill_node", END)
-builder.add_edge("error_node", END)
+# The Diagnostic node is no longer a dead end: a revert returns to Discovery with the
+# reason in context, bounded by MAX_DISCOVERY_RETRIES.
+builder.add_conditional_edges("error_node", route_after_error, ["discovery_node", END])
 
 checkpointer = MemorySaver()
 graph = builder.compile(checkpointer=checkpointer)

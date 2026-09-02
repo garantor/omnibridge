@@ -631,6 +631,48 @@ An env flag forcing the static path, so the agent can be disabled in one deploy 
 **Done when:** the golden set passes through the agent path at parity with the static baseline,
 with cost and latency recorded.
 
+### Built, and what differs from the plan
+
+`omnibridge/agent/` holds four modules: `discovery_agent` (the bounded loop), `provenance`
+(the on-chain checks), `synthesis` (proposal to transaction), `budget` (request-level
+accounting). Wired into node 2, with the retry edge closed in the compiled graph.
+
+**Not verified against the live API.** No credentials are configured in this environment, so
+every model call is exercised through a fake client. The control flow is tested — terminal
+tool calls, `pause_turn` resumption, refusals, budget ceilings, retry bounds — but no request
+has ever been sent. `tests/test_agent_discovery.py` carries a live smoke test that skips
+without `ANTHROPIC_API_KEY`. **Run it before trusting the request shape.**
+
+Deviations, each for a stated reason:
+
+- **A manual loop, not the SDK tool runner.** The runner exists to execute client tools and
+  continue; here the only client tool *is* the answer and must terminate the loop. A manual
+  loop is a better fit and has no beta dependency.
+- **No `task_budget`.** It requires streaming plus a beta header, and shipping an untestable
+  streaming path as the default is worse than not having it. Its job — keeping a loop from
+  running away — is done by hard ceilings in `RequestBudget`: attempts, model calls, input
+  and output tokens, wall-clock. Revisit once a key exists to verify against.
+- **`no_route_found` is a second terminal tool.** §3 said `NO_ROUTE_FOUND` needs to be
+  expressible; giving the model an explicit way to say it is how. Honest refusal is cheap,
+  a guessed router address is not.
+- **Server-side fallbacks are on by default** (`fallbacks: "default"`), so a classifier
+  decline does not dead-end a legitimate bridging question. Disable with
+  `DiscoveryAgent(use_fallbacks=False)`.
+- **Without credentials the agent path silently falls through to the static one.** Deliberate:
+  the system keeps working, and the kill switch (`OMNIBRIDGE_DISABLE_AGENT=1`) forces the same
+  fall-through on demand.
+- **3.2's deletion of the scrapers is deferred to Phase 4**, since the static path still uses
+  them. The agent path uses `web_search_20260209` / `web_fetch_20260209` with a domain
+  allowlist and never touches them.
+
+Two findings worth carrying forward:
+
+- **The proxy fix from Phase 2 is implemented** and verified against both real routers: CCTP's
+  TokenMessenger passes directly, Across's SpokePool passes via its EIP-1967 implementation.
+- **"Holds bytecode" is no longer "is a contract".** Since EIP-7702 a delegated EOA carries 23
+  bytes (`0xef0100 || address`), so the bytecode check alone would pass one. The selector check
+  is what rejects it, which is why both run.
+
 ---
 
 ## Phase 4 — Delete the static residue
