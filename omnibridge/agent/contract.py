@@ -28,8 +28,11 @@ from typing import Any, Dict, List, Optional
 # somewhere else is not accepted, which is what stops a forum post or an AI-generated
 # tutorial being cited as protocol documentation.
 DEFAULT_ALLOWED_DOMAINS = [
-    "docs.circle.com",
     "developers.circle.com",
+    'https://developers.circle.com/ai/mcp'
+    'https://github.com/circlefin/skills'
+
+    
     "docs.across.to",
     "docs.layerzero.network",
     "docs.wormhole.com",
