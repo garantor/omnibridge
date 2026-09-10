@@ -25,6 +25,14 @@
   --bg-gradient-2: rgba(6, 182, 212, 0.12);
   --brand-gradient: linear-gradient(135deg, #ffffff 40%, #94a3b8 100%);
   --telemetry-box-bg: rgba(0, 0, 0, 0.25);
+
+  /* Status text. Every verdict, banner, log line and plan row draws its colour from
+     these three rather than hardcoding a tint, because a tint that reads well on
+     #0a0d14 is invisible on #f8fafc. They were hardcoded, and light mode rendered
+     every error as pale pink on near-white — about 1.3:1, unreadable. */
+  --on-rose: #fecdd3;
+  --on-amber: #fcd34d;
+  --on-green: #6ee7b7;
 }
 
 [data-theme="light"] {
@@ -48,6 +56,12 @@
   --bg-gradient-2: rgba(6, 182, 212, 0.06);
   --brand-gradient: linear-gradient(135deg, #0f172a 40%, #475569 100%);
   --telemetry-box-bg: #f8fafc;
+
+  /* The same three roles, dark enough to read on a light ground. Each clears 4.5:1
+     against its own tinted background as well as against --bg-primary. */
+  --on-rose: #9f1239;
+  --on-amber: #92400e;
+  --on-green: #065f46;
 }
 
 * {
@@ -600,8 +614,8 @@ body {
 .muted { color: var(--text-muted); font-style: italic; }
 .mono { font-family: "JetBrains Mono", monospace; word-break: break-all; }
 
-.telemetry-tag.tag-rose  { background: rgba(244, 63, 94, 0.15);  color: #fda4af; border: 1px solid rgba(244, 63, 94, 0.35); }
-.telemetry-tag.tag-amber { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.35); }
+.telemetry-tag.tag-rose  { background: rgba(244, 63, 94, 0.15);  color: var(--on-rose); border: 1px solid rgba(244, 63, 94, 0.35); }
+.telemetry-tag.tag-amber { background: rgba(245, 158, 11, 0.15); color: var(--on-amber); border: 1px solid rgba(245, 158, 11, 0.35); }
 
 .telemetry-note {
   margin-top: 0.75rem;
@@ -624,7 +638,7 @@ body {
   color: var(--text-secondary);
 }
 
-.code-box.code-error { color: #fda4af; }
+.code-box.code-error { color: var(--on-rose); }
 
 /* Provenance checks */
 .provenance { margin-top: 0.85rem; }
@@ -659,9 +673,9 @@ body {
 }
 .amount-check .amount-note { font-size: 0.8rem; line-height: 1.5; opacity: 0.9; margin: 0; }
 
-.amount-ok   { background: rgba(16, 185, 129, 0.10); border-color: rgba(16, 185, 129, 0.35); color: #6ee7b7; }
-.amount-warn { background: rgba(245, 158, 11, 0.10); border-color: rgba(245, 158, 11, 0.35); color: #fcd34d; }
-.amount-bad  { background: rgba(244, 63, 94, 0.12);  border-color: var(--accent-rose);       color: #fecdd3; }
+.amount-ok   { background: rgba(16, 185, 129, 0.10); border-color: rgba(16, 185, 129, 0.35); color: var(--on-green); }
+.amount-warn { background: rgba(245, 158, 11, 0.10); border-color: rgba(245, 158, 11, 0.35); color: var(--on-amber); }
+.amount-bad  { background: rgba(244, 63, 94, 0.12);  border-color: var(--accent-rose);       color: var(--on-rose); }
 
 /* Terminal verdicts */
 .verdict { border-radius: var(--radius-md); padding: 1.5rem; border: 1px solid; }
@@ -674,8 +688,8 @@ body {
   border-radius: 4px;
   background: rgba(127, 127, 127, 0.18);
 }
-.verdict-amber { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.35); color: #fcd34d; }
-.verdict-rose  { background: rgba(244, 63, 94, 0.08);  border-color: rgba(244, 63, 94, 0.35);  color: #fecdd3; }
+.verdict-amber { background: rgba(245, 158, 11, 0.08); border-color: rgba(245, 158, 11, 0.35); color: var(--on-amber); }
+.verdict-rose  { background: rgba(244, 63, 94, 0.08);  border-color: rgba(244, 63, 94, 0.35);  color: var(--on-rose); }
 
 .banner {
   border-radius: var(--radius-md);
@@ -684,8 +698,12 @@ body {
   border: 1px solid;
   line-height: 1.5;
 }
-.banner-amber { background: rgba(245, 158, 11, 0.15); border-color: var(--accent-amber); color: #fde68a; }
-.banner-rose  { background: rgba(244, 63, 94, 0.15);  border-color: var(--accent-rose);  color: #fecdd3; }
+.banner-amber { background: rgba(245, 158, 11, 0.15); border-color: var(--accent-amber); color: var(--on-amber); }
+.banner-rose  { background: rgba(244, 63, 94, 0.15);  border-color: var(--accent-rose);  color: var(--on-rose); }
+.banner-green { background: rgba(16, 185, 129, 0.12); border-color: var(--accent-green); color: var(--on-green); }
+/* Slate, not green: an unread balance must not look like a healthy one. */
+.banner-slate { background: rgba(148, 163, 184, 0.12); border-color: var(--border-color); color: var(--text-secondary); }
+.banner-note { display: block; margin-top: 0.5rem; font-size: 0.85em; opacity: 0.85; }
 
 .manifest-head {
   display: flex;
@@ -711,7 +729,7 @@ body {
 .btn-danger {
   background: rgba(244, 63, 94, 0.15);
   border: 1px solid var(--accent-rose);
-  color: #fecdd3;
+  color: var(--on-rose);
 }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
@@ -729,12 +747,12 @@ body {
   border-radius: 999px;
   font-weight: 600;
 }
-.skill-badge.ok  { background: rgba(16, 185, 129, 0.15); color: #6ee7b7; }
-.skill-badge.bad { background: rgba(245, 158, 11, 0.15); color: #fcd34d; }
+.skill-badge.ok  { background: rgba(16, 185, 129, 0.15); color: var(--on-green); }
+.skill-badge.bad { background: rgba(245, 158, 11, 0.15); color: var(--on-amber); }
 .skill-failure {
   margin-top: 0.5rem;
   font-size: 0.75rem;
-  color: #fcd34d;
+  color: var(--on-amber);
   line-height: 1.45;
   word-break: break-word;
 }
@@ -801,9 +819,9 @@ body {
 /* Not a pass and not a failure: nothing has been checked yet. */
 .plan-step.step-pending { border-left-color: var(--border-color); opacity: 0.78; }
 .plan-step.step-done    { opacity: 0.6; }
-.plan-step.step-ok   .plan-step-state { color: #6ee7b7; }
-.plan-step.step-bad  .plan-step-state { color: #fecdd3; }
-.plan-step.step-warn .plan-step-state { color: #fcd34d; }
+.plan-step.step-ok   .plan-step-state { color: var(--on-green); }
+.plan-step.step-bad  .plan-step-state { color: var(--on-rose); }
+.plan-step.step-warn .plan-step-state { color: var(--on-amber); }
 .plan-step.step-pending .plan-step-state { color: var(--text-muted); }
 
 /* ---------------------------------------------------------------------------
@@ -849,7 +867,7 @@ body {
 .log-step   .log-marker { color: var(--accent-cyan); }
 .log-ok     .log-marker { color: var(--accent-green); }
 .log-warn   .log-marker { color: var(--accent-amber); }
-.log-warn   .log-msg    { color: #fcd34d; }
+.log-warn   .log-msg    { color: var(--on-amber); }
 .log-fail   .log-marker { color: var(--accent-rose); }
-.log-fail   .log-msg    { color: #fecdd3; }
+.log-fail   .log-msg    { color: var(--on-rose); }
 .log-detail .log-msg    { color: var(--text-secondary); }
