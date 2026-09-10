@@ -201,9 +201,14 @@ def test_a_cache_hit_still_has_to_clear_simulation():
     """
     import graph as g
 
-    # A route that was found goes to the builder, and the builder only to the simulator.
+    # A route that was found goes to the builder, and the builder's only onward path
+    # for a built plan is the simulator. That edge became conditional when the funding
+    # gate landed — a plan `build_plan` refused to build must reach the diagnostic
+    # rather than being simulated anyway — so the property is asserted on the branch
+    # rather than on a static edge, which no longer exists.
     assert g.route_after_discovery({"status": "ROUTE_DISCOVERED"}) == "code_builder_node"
-    assert ("code_builder_node", "simulator_node") in g.builder.edges
+    assert g.route_after_code_builder({"status": "PAYLOAD_BUILT"}) == "simulator_node"
+    assert g.route_after_code_builder({"status": "MISSING_PREREQUISITE"}) == "error_node"
 
     # The only way into the approval gate is the simulator's conditional edge — no
     # static edge reaches it — and it opens only for VERIFIED.

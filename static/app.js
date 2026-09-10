@@ -96,6 +96,103 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // ---------------------------------------------------------------- funding
+  //
+  // Read the wallet as soon as it connects. Discovery costs money and takes a minute,
+  // and an empty wallet invalidates every route it could return — so the cheap
+  // question is asked first. The server answers the same question again before
+  // discovery runs; this is the early copy, not the authority.
+
+  const fundingBanner = document.getElementById("funding-banner");
+
+  /** The chain the transfer would leave from: what the intent says, else the wallet's. */
+  function intendedSourceChain() {
+    const typed = (intentInput.value || "").match(/\bfrom\s+([a-zA-Z0-9_-]+)\s+to\s+/i);
+    if (typed) return typed[1];
+    const wallets = onboard.state.get().wallets;
+    const hexId = wallets && wallets[0] && wallets[0].chains && wallets[0].chains[0]
+      ? wallets[0].chains[0].id
+      : null;
+    // The registry resolves a numeric chain id ahead of any name, so send the id.
+    return hexId ? String(parseInt(hexId, 16)) : null;
+  }
+
+  function renderFunding(data) {
+    // Three outcomes, three appearances. UNCHECKED is deliberately not green: the
+    // balance was not read, and a reassuring banner would say otherwise.
+    const tone = data.status === "INSUFFICIENT"
+      ? "banner-rose"
+      : data.status === "SUFFICIENT" ? "banner-green" : "banner-slate";
+
+    // On a pass, lead with the asset the user is actually sending; the native
+    // balance is the gas footnote, not the answer to the question they asked.
+    const asset = data.asset_balance !== null && data.asset_balance !== undefined
+      ? `${esc(data.asset_balance)} ${esc(data.asset_symbol)}`
+      : null;
+    const gas = `${esc(data.native_balance)} ${esc(data.native_symbol)} for gas`;
+
+    const headline = data.status === "INSUFFICIENT"
+      ? esc(data.reason)
+      : data.status === "SUFFICIENT"
+        ? `${asset ? `${asset}, ` : ""}${gas}, on ${esc(data.chain.name)}.`
+        : `Balance not read on ${esc(data.chain.name)}.`;
+
+    const notes = [...(data.status === "SUFFICIENT" ? [] : data.checked), ...data.deferred]
+      .map((n) => `<span class="banner-note">${esc(n)}</span>`)
+      .join("");
+
+    fundingBanner.className = `banner ${tone}`;
+    fundingBanner.innerHTML = `<strong>Funding:</strong> ${headline}${notes}`;
+    fundingBanner.classList.remove("hidden");
+  }
+
+  async function checkFunding() {
+    if (!userConnectedAddress) {
+      fundingBanner.classList.add("hidden");
+      return;
+    }
+    const sourceChain = intendedSourceChain();
+    if (!sourceChain) return;
+
+    try {
+      const res = await fetch("/api/preflight", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userAddress: userConnectedAddress,
+          sourceChain,
+          asset: assetFromIntent(),
+          amount: amountFromIntent(),
+        }),
+      });
+      if (!res.ok) {
+        // A chain the registry does not carry is a real answer, but not a funding
+        // one — say nothing here rather than implying the wallet was checked.
+        fundingBanner.classList.add("hidden");
+        return;
+      }
+      renderFunding(await res.json());
+    } catch (err) {
+      // Never let the early check block the run it exists to speed up.
+      console.warn("preflight funding check failed:", err);
+      fundingBanner.classList.add("hidden");
+    }
+  }
+
+  function assetFromIntent() {
+    const m = (intentInput.value || "").match(
+      /(?:bridge|swap|send|move|transfer)\s+\d+(?:\.\d+)?\s*([a-zA-Z0-9_-]+)/i
+    );
+    return m ? m[1].toUpperCase() : null;
+  }
+
+  function amountFromIntent() {
+    const m = (intentInput.value || "").match(
+      /(?:bridge|swap|send|move|transfer)\s+(\d+(?:\.\d+)?)/i
+    );
+    return m ? parseFloat(m[1]) : null;
+  }
+
   // Blocknative Subscription for reactive wallet state
   const state = onboard.state.select("wallets");
   state.subscribe((wallets) => {
@@ -105,11 +202,13 @@ document.addEventListener("DOMContentLoaded", () => {
       connectWalletBtn.style.borderColor = "var(--accent-green)";
       connectWalletBtn.style.color = "var(--text-primary)";
       connectWalletBtn.style.background = "rgba(16, 185, 129, 0.12)";
+      checkFunding();
     } else {
       userConnectedAddress = null;
       walletBtnText.textContent = "Connect Wallet";
       connectWalletBtn.style.borderColor = "var(--border-color)";
       connectWalletBtn.style.background = "var(--bg-secondary)";
+      fundingBanner.classList.add("hidden");
     }
   });
 
@@ -163,7 +262,18 @@ document.addEventListener("DOMContentLoaded", () => {
     chip.addEventListener("click", () => {
       intentInput.value = chip.getAttribute("data-intent");
       intentInput.focus();
+      // The chain and asset just changed, so the banner is about the wrong transfer.
+      checkFunding();
     });
+  });
+
+  // Re-read when the typed intent settles. Debounced: the check is a network call,
+  // and a stale banner about a different chain is worse than none.
+  let fundingDebounce = null;
+  intentInput.addEventListener("input", () => {
+    fundingBanner.classList.add("hidden");
+    clearTimeout(fundingDebounce);
+    fundingDebounce = setTimeout(checkFunding, 600);
   });
 
   // Fetch Skills from API
@@ -514,6 +624,51 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
       ${renderTelemetryCards(data.traces, data)}`;
   }
 
+  function renderInsufficientFunds(data) {
+    // An answer about the wallet, not a failure of the pipeline — and one reached
+    // before discovery was paid for, which is worth saying so the absent telemetry
+    // does not read as a run that broke early.
+    const f = data.funding || {};
+    const read = [
+      f.asset_balance !== null && f.asset_balance !== undefined
+        ? `${esc(f.asset_balance)} ${esc(f.asset_symbol)}`
+        : null,
+      f.native_balance !== null && f.native_balance !== undefined
+        ? `${esc(f.native_balance)} ${esc(f.native_symbol)} for gas`
+        : null,
+    ].filter(Boolean).join(", ");
+
+    return `
+      <div class="verdict verdict-amber">
+        <h3>Not enough to send this</h3>
+        <p>${esc(data.error || "This wallet cannot fund the transfer.")}</p>
+        <p class="subtitle">
+          Checked before any route was searched for, so nothing was spent finding one.
+          ${read ? `Read on chain: ${read}.` : ""}
+          ${f.asset_address_read_only
+            ? `<br><span class="muted">${esc(f.asset_symbol)} balance read at
+               ${esc(f.asset_address_read_only)}, corroborated by the contract's own
+               symbol(). Read-only — this address is never part of a transaction.</span>`
+            : ""}
+        </p>
+      </div>
+      ${renderTelemetryCards(data.traces, data)}`;
+  }
+
+  function renderUnresolvedChain(data) {
+    return `
+      <div class="verdict verdict-amber">
+        <h3>Chain not resolved</h3>
+        <p>${esc(data.error || "That chain could not be resolved.")}</p>
+        <p class="subtitle">
+          The EVM chain registry does not carry it. That means this source does not
+          know the chain — not that the chain does not exist, and not that no route
+          exists. Nothing was guessed and nothing was sent.
+        </p>
+      </div>
+      ${renderTelemetryCards(data.traces, data)}`;
+  }
+
   function renderFailure(data) {
     const status = data.verification && data.verification.simulation_status;
     const v = simVerdict(status);
@@ -760,6 +915,10 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
           outputSection.innerHTML = `<div class="verdict verdict-amber"><h3>Rejected</h3><p>Nothing was signed and nothing was broadcast.</p></div>`;
           resetPipeline();
         });
+      } else if (data.status === "INSUFFICIENT_FUNDS") {
+        outputSection.innerHTML = renderInsufficientFunds(data);
+      } else if (data.status === "UNRESOLVED_CHAIN") {
+        outputSection.innerHTML = renderUnresolvedChain(data);
       } else if (data.status === "MISSING_PREREQUISITE") {
         outputSection.innerHTML = renderMissingPrerequisite(data);
       } else if (data.status === "CONFIG_ERROR") {

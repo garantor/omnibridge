@@ -61,6 +61,31 @@ def _check_shape(proposal: RouteProposal, source_chain_id: int) -> List[str]:
     return problems
 
 
+def _transfer_amount(proposal: RouteProposal, calldata: str) -> Optional[int]:
+    """
+    The number of base units this route actually moves.
+
+    `decode_leading_uint256` reads argument word 0. That is the amount for every
+    encoder in `CalldataExecutor`, which is what its docstring is about — but an
+    agent-proposed signature puts whatever the *protocol* puts first. Across's
+    `depositV3(address depositor, ...)` puts an address there, which read as a uint256
+    is ~1.3e48, and that figure then became the balance the planner demanded and the
+    allowance it built. Every Across route failed the balance check, for every wallet.
+
+    The model already declares the base units the router will pull, in `spend.amount`,
+    and reviewed code already trusts that figure to build the approval. Prefer it.
+    Word 0 remains the fallback for a native transfer, which declares no spend.
+    """
+    if proposal.spend is not None:
+        try:
+            return int(str(proposal.spend.amount), 0)
+        except (TypeError, ValueError):
+            # Malformed enough that the planner will reject it too; fall through
+            # rather than inventing a figure here.
+            pass
+    return CalldataExecutor.decode_leading_uint256(calldata)
+
+
 def synthesize(
     proposal: RouteProposal,
     intent: UserIntent,
@@ -112,7 +137,7 @@ def synthesize(
             f"{proposal.function_signature!r}."
         )
 
-    raw_amount = CalldataExecutor.decode_leading_uint256(calldata)
+    raw_amount = _transfer_amount(proposal, calldata)
     quote = RouteQuote(
         bridge_name=proposal.protocol,
         source_chain_id=source_chain.chain_id,

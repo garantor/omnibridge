@@ -236,3 +236,37 @@ def test_a_replayed_skill_keeps_its_approval_step(tmp_path):
 
     skill = repo.find_skill("base", "arbitrum", "USDC")
     assert skill.metadata.spend["token"] == USDC
+
+
+# ---------------------------------------------------------- the transfer amount
+#
+# `deposit_amount_raw` is what the balance check compares against and what the
+# approval is sized to, so reading it out of the wrong word is not cosmetic.
+
+def test_the_transfer_amount_comes_from_the_declared_spend_not_argument_word_zero():
+    """
+    Across's depositV3 puts `address depositor` first.
+
+    Read as a uint256 that is ~1.3e48, which the planner then demanded as a balance
+    and built as an allowance — so every Across route failed for every wallet, and
+    with no RPC to check the balance it silently escalated to a near-unlimited
+    approval instead. The model already declares the base units in `spend.amount`.
+    """
+    from omnibridge.agent.contract import RouteProposal, TokenSpend
+    from omnibridge.agent.synthesis import _transfer_amount
+
+    depositor = "0xec64285c59a4509d6f8f7e1f871a77ca8c6f4f1a"
+    # depositV3 calldata: selector, then the depositor address as word 0.
+    calldata = "0x7b939232" + depositor[2:].rjust(64, "0")
+
+    proposal = RouteProposal(
+        protocol="Across V3", router_address=ROUTER,
+        function_signature="depositV3(address,address)", param_types=[], param_values=[],
+        source_chain_id=8453, dest_chain_ref={"scheme": "eip155", "value": "1"},
+        sources=[], rationale="", spend=TokenSpend(token=USDC, spender=ROUTER, amount="25000000"),
+    )
+    assert _transfer_amount(proposal, calldata) == 25_000_000
+
+    # No spend means a native transfer, which declares none — word 0 is all there is.
+    proposal.spend = None
+    assert _transfer_amount(proposal, calldata) == int(depositor, 16)

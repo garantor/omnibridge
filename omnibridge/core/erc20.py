@@ -21,6 +21,8 @@ from omnibridge.core.executor import CalldataExecutor
 APPROVE_SIGNATURE = "approve(address,uint256)"
 ALLOWANCE_SIGNATURE = "allowance(address,address)"
 BALANCE_OF_SIGNATURE = "balanceOf(address)"
+SYMBOL_SIGNATURE = "symbol()"
+DECIMALS_SIGNATURE = "decimals()"
 
 # The maximum a uint256 can hold. Deliberately never used as a default approval amount:
 # an unlimited allowance leaves the router able to move the whole balance forever, which
@@ -64,6 +66,46 @@ def read_balance(w3: Web3, token: str, owner: str) -> Optional[int]:
     if raw is None or len(raw) < 32:
         return None
     return int(abi_decode(["uint256"], raw)[0])
+
+
+def read_decimals(w3: Web3, token: str) -> Optional[int]:
+    """
+    The token's own decimals, or None when it could not be read.
+
+    Read rather than assumed. The scaling from a human amount to base units is the
+    difference between sending 25 USDC and sending 25,000,000 of them, and a table of
+    "USDC is 6, everything else is 18" is wrong for every token that is neither.
+    """
+    raw = _static_call(w3, token, DECIMALS_SIGNATURE, [], [])
+    if raw is None or len(raw) < 32:
+        return None
+    value = int(abi_decode(["uint8"], raw)[0])
+    # A token claiming more than 77 decimals cannot be scaled inside a uint256.
+    return value if 0 <= value <= 77 else None
+
+
+def read_symbol(w3: Web3, token: str) -> Optional[str]:
+    """
+    The token's own symbol, or None when it could not be read.
+
+    Used to corroborate an address that came from a token list: if the contract does
+    not call itself what the list says it is, the list entry is stale, wrong, or for a
+    different chain, and nothing should be concluded from a balance read against it.
+
+    Handles the pre-standard `bytes32` return as well as `string`. MKR is the famous
+    one, and treating its answer as unreadable would silently skip the check.
+    """
+    raw = _static_call(w3, token, SYMBOL_SIGNATURE, [], [])
+    if not raw:
+        return None
+    try:
+        return str(abi_decode(["string"], raw)[0]).strip() or None
+    except Exception:
+        pass
+    try:
+        return raw[:32].rstrip(b"\x00").decode("utf-8").strip() or None
+    except Exception:
+        return None
 
 
 def build_approve(spender: str, amount: int) -> str:

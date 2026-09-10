@@ -49,6 +49,10 @@ class GraphState(TypedDict):
     # The ordered transactions this transfer needs. A single-transaction
     # transfer is a plan of length one, so there is no second code path.
     plan: Optional[Dict[str, Any]]
+    # What the preflight funding gate read off chain before discovery ran. Carries
+    # UNCHECKED as a distinct outcome, so "could not read the balance" is never
+    # rendered as "the balance is fine".
+    funding: Optional[Dict[str, Any]]
 
 
 # Bounded by plan 3.4. Three attempts, then the run ends.
@@ -158,6 +162,119 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
         "status": "PARSED",
         "traces": traces,
     }
+
+
+# --- NODE 1.5: Preflight Funding Gate ---
+def preflight_node(state: GraphState) -> Dict[str, Any]:
+    """
+    Read the wallet before spending anything on its behalf.
+
+    Discovery calls a paid model. A wallet that cannot fund the transfer cannot send
+    the result of that call, whatever the result is, so the question is worth asking
+    first — it needs no route, no protocol and no calldata.
+
+    Both balances that can stop a run are read: the sending asset, which is what the
+    user actually asked about, and the native balance, because gas is payable only in
+    the chain's own currency.
+
+    The gate refuses on INSUFFICIENT only. UNCHECKED continues, because an unreachable
+    node — or a symbol no public token list carries — is not evidence that a wallet is
+    empty; it is recorded as unchecked so nothing downstream can read it as a pass.
+    """
+    from omnibridge.core.balance import FundingStatus, preflight
+    from omnibridge.discovery.rpc_manager import ChainResolutionError
+    from omnibridge.steplog import StepLogger
+
+    log = StepLogger("preflight")
+    src_name = state["source_chain"]
+    sender = state["user_address"]
+    traces = state.get("traces", {})
+
+    # Chain resolution used to happen first inside discovery, where a failure escaped
+    # the graph as an uncaught exception. It runs here now, so an unresolvable chain
+    # ends the run as a recorded refusal like every other honest "no".
+    try:
+        with log.timed(f"resolve chain '{src_name}'"):
+            src_info = rpc_mgr.discover_chain_metadata(src_name)
+    except ChainResolutionError as exc:
+        log.fail(str(exc))
+        traces["step_1b_preflight"] = {
+            "title": "Preflight Funding Check",
+            "outcome": "UNRESOLVED_CHAIN",
+            "reason": str(exc),
+            "status": "FAILED",
+        }
+        return {"status": "UNRESOLVED_CHAIN", "error": str(exc), "traces": traces}
+
+    try:
+        rpc_url = rpc_mgr.get_fastest_rpc_sync(src_name)
+    except Exception as exc:
+        # Not fatal. No balance can be read, which the report states as UNCHECKED.
+        log.warn(f"no reachable RPC for {src_name}: {exc}")
+        rpc_url = None
+
+    w3 = _verified_web3(rpc_url, src_info.chain_id)
+    report = preflight(
+        w3,
+        sender,
+        native_symbol=src_info.native_symbol,
+        chain_name=src_info.name,
+        token_symbol=state["asset"],
+        amount=float(state["amount"]),
+        chain_id=src_info.chain_id,
+    )
+
+    for line in report.checked:
+        log.value("read", line)
+    for line in report.deferred:
+        log.warn(line)
+
+    traces["step_1b_preflight"] = {
+        "title": "Preflight Funding Check",
+        "method": (
+            "eth_getBalance for gas, plus balanceOf on the sending token, against an "
+            "identity-checked node. The token address comes from a public token list "
+            "and is corroborated by the contract's own symbol() before its balance is "
+            "believed — it is read-only and never reaches calldata."
+        ),
+        "scope": (
+            "Source chain only, and funding only. Says nothing about whether a route "
+            "exists or whether the call would succeed; the simulator gates that. The "
+            "token the route actually approves is re-checked in build_plan."
+        ),
+        "funding": report.as_dict(),
+        "status": "COMPLETED" if report.ok else "FAILED",
+    }
+
+    if report.status is FundingStatus.INSUFFICIENT:
+        log.fail(report.reason or "insufficient funds")
+        return {
+            "status": "INSUFFICIENT_FUNDS",
+            "error": report.reason,
+            "funding": report.as_dict(),
+            "active_rpc": rpc_url,
+            "traces": traces,
+        }
+
+    log.ok(f"funding {report.status.value.lower()} — continuing to discovery")
+    return {
+        "status": "FUNDING_CHECKED",
+        "funding": report.as_dict(),
+        "active_rpc": rpc_url,
+        "traces": traces,
+    }
+
+
+def route_after_preflight(state: GraphState) -> str:
+    """
+    An empty wallet ends the run before discovery is paid for.
+
+    Not retried: `route_after_error` only retries when a `failure_context` was set, and
+    nothing about a balance improves by asking a model again.
+    """
+    if state.get("status") in ("INSUFFICIENT_FUNDS", "UNRESOLVED_CHAIN"):
+        return "error_node"
+    return "discovery_node"
 
 
 # --- NODE 2: Skill Replay or Agent Discovery ---
@@ -520,6 +637,23 @@ def _missing_prerequisite(reason: str) -> Optional[str]:
             "wrong; retrying would reach the same result."
         )
     return None
+
+
+def route_after_code_builder(state: GraphState) -> str:
+    """
+    A plan that could not be built must not be simulated anyway.
+
+    `build_plan` raises PrerequisiteUnsatisfiable when the sender cannot cover the
+    transfer, and code_builder_node turns that into MISSING_PREREQUISITE *without a
+    plan*. The edge into the simulator used to be unconditional, so the simulator found
+    no plan, fell back to simulating the bare bridge calldata — the one call the planner
+    documents as uncheckable before its approval lands — and reported
+    `ERC20: transfer amount exceeds allowance`. The balance diagnosis was overwritten by
+    a revert caused by the missing approval the plan existed to add.
+    """
+    if state.get("status") == "MISSING_PREREQUISITE":
+        return "error_node"
+    return "simulator_node"
 
 
 def route_after_error(state: GraphState) -> str:
@@ -1082,8 +1216,18 @@ def error_node(state: GraphState) -> Dict[str, Any]:
         # A no-route keeps its own name through the diagnostic. Flattening every
         # outcome to ERROR forced callers to pattern-match the message to tell "no
         # bridge exists for this pair" from "the bridge rejected this transaction".
+        # INSUFFICIENT_FUNDS and UNRESOLVED_CHAIN are here for the same reason: both
+        # are answers about the request, not failures of the pipeline, and both are
+        # things the user can act on.
         "status": state["status"]
-        if state.get("status") in ("NO_ROUTE_FOUND", "CONFIG_ERROR", "MISSING_PREREQUISITE")
+        if state.get("status")
+        in (
+            "NO_ROUTE_FOUND",
+            "CONFIG_ERROR",
+            "MISSING_PREREQUISITE",
+            "INSUFFICIENT_FUNDS",
+            "UNRESOLVED_CHAIN",
+        )
         else "ERROR",
         "error": reason or "Unknown execution error occurred",
         "failure_context": failure_context,
@@ -1096,6 +1240,7 @@ def error_node(state: GraphState) -> Dict[str, Any]:
 builder = StateGraph(GraphState)
 
 builder.add_node("intent_parser_node", intent_parser_node)
+builder.add_node("preflight_node", preflight_node)
 builder.add_node("discovery_node", discovery_node)
 builder.add_node("code_builder_node", code_builder_node)
 builder.add_node("simulator_node", simulator_node)
@@ -1104,11 +1249,18 @@ builder.add_node("broadcast_skill_node", broadcast_skill_node)
 builder.add_node("error_node", error_node)
 
 builder.add_edge(START, "intent_parser_node")
-builder.add_edge("intent_parser_node", "discovery_node")
+# Funding is checked before discovery, because discovery is the expensive step and an
+# empty wallet invalidates every route it could return.
+builder.add_edge("intent_parser_node", "preflight_node")
+builder.add_conditional_edges(
+    "preflight_node", route_after_preflight, ["discovery_node", "error_node"]
+)
 builder.add_conditional_edges(
     "discovery_node", route_after_discovery, ["code_builder_node", "error_node"]
 )
-builder.add_edge("code_builder_node", "simulator_node")
+builder.add_conditional_edges(
+    "code_builder_node", route_after_code_builder, ["simulator_node", "error_node"]
+)
 builder.add_conditional_edges("simulator_node", route_after_simulation, ["hitl_gate_node", "error_node"])
 builder.add_edge("hitl_gate_node", "broadcast_skill_node")
 builder.add_edge("broadcast_skill_node", END)

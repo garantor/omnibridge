@@ -58,15 +58,27 @@ def test_a_failed_run_still_returns_its_traces():
     """
     The error branch returned `{status, thread_id, error}` and dropped the traces, so
     a user saw that something failed but nothing about where.
+
+    The exact terminal status is deliberately not asserted. `WALLET` is a real mainnet
+    address, and the funding gate now reads its live balance — so whether this run
+    stops at INSUFFICIENT_FUNDS or reaches NO_ROUTE_FOUND depends on what a stranger
+    happens to hold today. Pinning one of them would make this a test of their wallet.
+    The property under test is that a terminal run keeps its traces, whichever it is.
     """
     res = client.post(
         "/api/bridge/start",
         json={"input": "swap 100 usdc from base to stellar", "userAddress": WALLET},
     )
     body = res.json()
-    assert body["status"] == "NO_ROUTE_FOUND"
+    assert body["status"] in ("NO_ROUTE_FOUND", "INSUFFICIENT_FUNDS")
     assert "step_1_intent" in body["traces"]
-    assert "step_2_discovery" in body["traces"]
+    assert "step_1b_preflight" in body["traces"]
+    if body["status"] == "NO_ROUTE_FOUND":
+        assert "step_2_discovery" in body["traces"]
+    else:
+        # Stopped before discovery, and says what it read rather than only that it stopped.
+        assert "step_2_discovery" not in body["traces"]
+        assert body["funding"]["status"] == "INSUFFICIENT"
     assert body["verification"]["simulation_status"] is None
 
 
@@ -252,3 +264,46 @@ def test_markup_is_stripped_for_the_browser():
     from omnibridge.steplog import strip_markup
 
     assert strip_markup("[bold]gemini[/bold] ok [dim](0.4s)[/dim]") == "gemini ok (0.4s)"
+
+
+# ------------------------------------------------------- preflight funding gate
+
+def test_preflight_refuses_an_address_it_cannot_check():
+    """No network call is worth making for something that is not an address."""
+    res = client.post(
+        "/api/preflight", json={"userAddress": "not-an-address", "sourceChain": "base"}
+    )
+    assert res.status_code == 400
+    assert "not a valid EVM address" in res.json()["detail"]
+
+
+def test_preflight_reports_an_unread_balance_as_unchecked_not_as_ok(monkeypatch):
+    """
+    A node that cannot be reached must not produce a reassuring answer.
+
+    `ok` is "the pipeline may continue", which an unchecked balance does — so `ok`
+    alone would read as a pass. The status is what says the balance was never read.
+    """
+    import graph
+    from omnibridge.core.models import ChainInfo
+
+    base = ChainInfo(
+        chain_id=8453, name="Base", native_symbol="ETH", block_explorer="", rpc_urls=[]
+    )
+
+    def no_rpc(name):
+        raise ConnectionError("every endpoint is down")
+
+    monkeypatch.setattr(graph.rpc_mgr, "discover_chain_metadata", lambda name, **kw: base)
+    monkeypatch.setattr(graph.rpc_mgr, "get_fastest_rpc_sync", no_rpc)
+
+    res = client.post(
+        "/api/preflight",
+        json={"userAddress": "0x060477185Be90701b825b80f827070ef0DA69c5E", "sourceChain": "base"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "UNCHECKED"
+    assert body["native_balance_wei"] is None
+    assert body["ok"] is True
+    assert any("not a pass" in note for note in body["deferred"])

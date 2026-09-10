@@ -54,6 +54,23 @@ class StartBridgeRequest(BaseModel):
     slippage: Optional[str] = Field(default="0.5%")
 
 
+class PreflightRequest(BaseModel):
+    """
+    A funding question, asked before a run is started.
+
+    The browser calls this when a wallet connects, so the answer arrives before the
+    user has typed an intent — and before /api/bridge/start pays a model to research a
+    route the wallet could not send.
+    """
+
+    userAddress: str = Field(..., description="Connected wallet address.")
+    sourceChain: str = Field(..., description="Chain the transaction would be submitted on.")
+    #: Optional. Without them only the native balance is read, which still catches a
+    #: wallet that cannot pay gas; with them the sending asset is checked too.
+    asset: Optional[str] = Field(default=None, example="USDC")
+    amount: Optional[float] = Field(default=None, example=100.0)
+
+
 class ResumeBridgeRequest(BaseModel):
     thread_id: str
     signed_transaction_hex: Optional[str] = None
@@ -156,6 +173,9 @@ def _state_response(thread_id: str, values: dict) -> dict:
             "gas_used": sim.get("gas_used"),
             "revert_reason": sim.get("revert_reason"),
         },
+        # What the preflight gate read before discovery ran, carried through so a run
+        # that stopped on funding can say what it read rather than only that it stopped.
+        "funding": values.get("funding"),
         "agent_evidence": values.get("agent_evidence"),
         "budget": values.get("budget"),
         # Surfaced so the page can say a cached route was retired, rather than the
@@ -371,6 +391,65 @@ def advance_plan_step(req: AdvanceStepRequest):
         "plan": plan.model_dump(),
         "next_step": step.model_dump() if step else None,
         "all_signed": all(s.tx_hash for s in plan.steps),
+    }
+
+
+@server_app.post("/api/preflight")
+def preflight_funding(req: PreflightRequest):
+    """
+    Read the connected wallet's balance before any route is searched for.
+
+    Deliberately separate from /api/bridge/start rather than folded into it. The point
+    is to answer before the expensive step, and the browser knows the wallet at connect
+    time — a whole run does not have to be started to learn that gas cannot be paid.
+
+    Reads both balances that can stop a transfer: the sending asset, and the native
+    currency that gas is paid in. For an ERC-20 the symbol is resolved against public
+    token lists and then corroborated by the contract's own `symbol()`; a symbol that
+    resolves to nothing is reported UNCHECKED, never as a zero balance.
+
+    The resolved address is read-only evidence. It is returned as
+    `asset_address_read_only` and is never encoded into a transaction — the token that
+    actually gets approved comes from the route and is re-checked in build_plan.
+    """
+    from omnibridge.core.balance import preflight
+    from omnibridge.core.simulator import is_evm_address
+    from omnibridge.discovery.rpc_manager import ChainResolutionError
+    from graph import _verified_web3, rpc_mgr
+
+    if not is_evm_address(req.userAddress):
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{req.userAddress}' is not a valid EVM address; nothing to check.",
+        )
+
+    try:
+        chain = rpc_mgr.discover_chain_metadata(req.sourceChain)
+    except ChainResolutionError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    try:
+        rpc_url = rpc_mgr.get_fastest_rpc_sync(req.sourceChain)
+    except Exception:
+        rpc_url = None
+
+    report = preflight(
+        _verified_web3(rpc_url, chain.chain_id),
+        req.userAddress,
+        native_symbol=chain.native_symbol,
+        chain_name=chain.name,
+        token_symbol=req.asset or "",
+        amount=float(req.amount or 0.0),
+        chain_id=chain.chain_id,
+    )
+
+    return {
+        "chain": {"name": chain.name, "chain_id": chain.chain_id},
+        "rpc": rpc_url,
+        # `ok` is "the pipeline may continue", not "there is enough". An UNCHECKED
+        # report is ok and is not a pass — the caller must render `status`.
+        "ok": report.ok,
+        **report.as_dict(),
     }
 
 

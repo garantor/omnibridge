@@ -44,6 +44,10 @@
           <p class="subtitle">Describe what you want to bridge in plain English. Routes are replayed from verified skill memory or discovered at runtime — there are no hardcoded routers, and an unknown route is reported as unknown rather than guessed.</p>
         </div>
 
+        <!-- Filled when a wallet connects, from /api/preflight. Empty until then:
+             an unread balance is not reported as a healthy one. -->
+        <div id="funding-banner" class="hidden"></div>
+
         <form id="bridge-form" class="intent-form">
           <div class="input-wrapper">
             <input 

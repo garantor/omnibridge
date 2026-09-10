@@ -49,6 +49,7 @@ up as though it had worked. `OMNIBRIDGE_NO_DOTENV=1` skips the file.
 | `OMNIBRIDGE_PROVIDER` | Which model provider answers discovery. Required only when more than one is configured — see [docs/PROVIDERS.md](docs/PROVIDERS.md) |
 | `OMNIBRIDGE_MODEL` | Override the provider's default model |
 | `OMNIBRIDGE_LOG` | `quiet` / `normal` (default) / `debug`. `normal` prints a timed, step-by-step trail of what each stage did; `debug` adds prompts, model findings and payloads |
+| `OMNIBRIDGE_TOKEN_LISTS` | Comma-separated tokenlists.org URLs the funding gate resolves symbols against, in order. Defaults to the Uniswap Labs and Optimism lists. Point it at an internal mirror, or widen coverage for long-tail tokens |
 | `OMNIBRIDGE_DISABLE_AGENT=1` | Forces the cache-only path |
 | `OMNIBRIDGE_MAX_RETRIES` | Discovery retry ceiling (default 3) |
 
@@ -71,12 +72,14 @@ Three commitments shape the architecture:
 Two runtimes sit over one shared core. They implement the same six stages and are **not** behaviourally identical — see the note below.
 
 ```
-[Intent] ─► [Discovery] ─► [JIT Calldata] ─► [eth_call Sim] ─► [HITL Gate] ─► [Broadcast + SKILL.md]
-   1             2                3                4               5                  6
+[Intent] ─► [Funding] ─► [Discovery] ─► [JIT Calldata] ─► [eth_call Sim] ─► [HITL Gate] ─► [Broadcast + SKILL.md]
+   1           1b             2                3                4               5                  6
 ```
 
+Stage 1b reads the wallet before stage 2 spends anything on its behalf. Discovery is the expensive step — a paid model call taking a minute or more — and a wallet that cannot fund the transfer cannot send whatever it returns, so the cheap question is asked first. It reads both balances that can stop a run: the **sending asset**, and the **native currency** gas is paid in. It refuses only on a balance it actually read; an unreachable node, or a symbol no public token list carries, yields `UNCHECKED`, which continues and is never rendered as a pass.
+
 **LangGraph runtime** — [`graph.py`](graph.py), served by [`server.py`](server.py)
-A `StateGraph` of six nodes with a `MemorySaver` checkpointer. Stage 5 uses a native LangGraph `interrupt()`, so the run pauses mid-graph: `/api/bridge/start` returns the pending payload plus a `thread_id`, the browser wallet signs, and `/api/bridge/resume` continues the same checkpoint. Every node writes into a `traces` dict that the UI renders as per-stage telemetry cards. This is the runtime under active development.
+A `StateGraph` of seven nodes with a `MemorySaver` checkpointer. Stage 5 uses a native LangGraph `interrupt()`, so the run pauses mid-graph: `/api/bridge/start` returns the pending payload plus a `thread_id`, the browser wallet signs, and `/api/bridge/resume` continues the same checkpoint. Every node writes into a `traces` dict that the UI renders as per-stage telemetry cards. This is the runtime under active development.
 
 **CLI runtime** — [`omnibridge/core/agent.py`](omnibridge/core/agent.py), driven by [`omnibridge/cli.py`](omnibridge/cli.py)
 The same six stages as a straight synchronous call, with approval as a terminal prompt.
@@ -92,6 +95,8 @@ The same six stages as a straight synchronous call, with approval as a terminal 
 | [`discovery/route_finder.py`](omnibridge/discovery/route_finder.py) | Tier 0 `SKILL.md` cache lookup. Nothing else — discovery is the agent's job |
 | [`agent/`](omnibridge/agent/) | The reasoning core. `contract.py` and `provider.py` are vendor-neutral — the answer shape, the schema, the prompt and provider selection; `discovery_agent.py` is the Anthropic implementation. Request budgets, on-chain provenance checks and the deterministic proposal→calldata boundary live here too |
 | [`core/executor.py`](omnibridge/core/executor.py) | ABI encoding via `encode_dynamic_calldata`, plus per-request parameter binding |
+| [`core/balance.py`](omnibridge/core/balance.py) | Preflight funding: the sending asset's balance and the native gas balance, before discovery. Three-valued, so "could not read" is never a pass |
+| [`discovery/token_registry.py`](omnibridge/discovery/token_registry.py) | Symbol → address from live public token lists, the way `rpc_manager` resolves chains. Refuses ambiguity; the answer is read-only and never reaches calldata |
 | [`core/simulator.py`](omnibridge/core/simulator.py) | `eth_call` + `estimate_gas`; the revert circuit breaker |
 | [`core/signer.py`](omnibridge/core/signer.py) | Broadcast — raw RLP, or an already-submitted hash returned by a browser wallet |
 | [`skills/manager.py`](omnibridge/skills/manager.py) | `SKILL.md` with YAML frontmatter — exact-match lookup, demote-on-failure, retained revisions |
@@ -159,6 +164,10 @@ Two controls are human-owned and must fail closed. Their importance scales with 
 
 Both now fail closed. `UNAVAILABLE` ("could not check") and `UNSUPPORTED` ("no `eth_call` path") are refusals, not passes, and the manifest names which of them occurred and on which chain. A cache hit is a shortcut past discovery, not past either gate.
 
+Ahead of both sits a **funding gate**, which is not a safety control and is not a substitute for one. Its job is economy: a run that cannot possibly succeed ends before it costs a model call. It reads the sending token's balance and the native gas balance before discovery, and `build_plan` re-reads the token balance afterwards against the address the *route* names. It follows the same three-valued rule as the gates above — `UNCHECKED` continues and is never rendered as a pass.
+
+The preflight address comes from a public token list and is corroborated by the contract's own `symbol()` before any balance read against it is believed. It is **read-only**: it never reaches calldata, and the token that actually gets approved comes from the model's proposal. That boundary is what makes a third-party list an acceptable dependency — a wrong entry can only make the early check less certain, never make a transaction wrong.
+
 ---
 
 ## Known Gaps
@@ -171,11 +180,13 @@ Ordered by how much they matter.
 
 3. **`eth_call` proves the source leg only.** No simulation can establish that funds arrive on the destination chain. The manifest says so explicitly rather than implying end-to-end verification.
 
-4. **Discovery is non-deterministic.** The same intent, run twice, may yield two different valid routers. The skill cache bounds this in practice — the first verified answer becomes the cached one — but whether that is sufficient for a financial path is a product decision.
+4. **The funding gate depends on public token lists for coverage.** A symbol no list carries reports `UNCHECKED` rather than refusing, so an insufficient balance in a long-tail token is still only caught in `build_plan`, after discovery has been paid for. Widening coverage is a matter of adding lists to `OMNIBRIDGE_TOKEN_LISTS`, not of changing the logic.
 
-5. **Cold-path cost is unmeasured.** An Opus 5 discovery run with search and fetches costs materially more than a cache hit. Skills amortise it, but the cold number is not yet known.
+5. **Discovery is non-deterministic.** The same intent, run twice, may yield two different valid routers. The skill cache bounds this in practice — the first verified answer becomes the cached one — but whether that is sufficient for a financial path is a product decision.
 
-6. **The CLI and the LangGraph runtime still differ on broadcast.** The CLI passes `dry_run=(private_key is None)`; the graph passes `dry_run=False`. Behaviour observed in one does not carry to the other.
+6. **Cold-path cost is unmeasured.** An Opus 5 discovery run with search and fetches costs materially more than a cache hit. Skills amortise it, but the cold number is not yet known.
+
+7. **The CLI and the LangGraph runtime still differ on broadcast.** The CLI passes `dry_run=(private_key is None)`; the graph passes `dry_run=False`. Behaviour observed in one does not carry to the other.
 
 ### Closed since the first revision of this file
 
