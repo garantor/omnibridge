@@ -383,10 +383,10 @@ def test_documentation_plus_an_explorer_is_enough():
     from omnibridge.agent.provenance import check_sources
 
     result = check_sources(
-        ["https://docs.circle.com/cctp", "https://basescan.org/address/0x1682"],
+        ["https://developers.circle.com/cctp", "https://basescan.org/address/0x1682"],
         DEFAULT_ALLOWED_DOMAINS,
     )
-    assert result["primary"] == ["docs.circle.com"]
+    assert result["primary"] == ["developers.circle.com"]
     assert result["secondary"] == ["basescan.org"]
     assert len(result["corroborating"]) == 2
     # Dropped, not fatal.
@@ -427,11 +427,53 @@ def test_a_citation_the_search_never_fetched_is_recorded():
     from omnibridge.agent.provenance import check_sources
 
     result = check_sources(
-        ["https://docs.circle.com/a", "https://developers.circle.com/b"],
+        ["https://developers.circle.com/a", "https://docs.base.org/b"],
         DEFAULT_ALLOWED_DOMAINS,
         retrieved=["https://docs.across.to/elsewhere"],
     )
     assert len(result["unretrieved_citations"]) == 2
+
+
+def test_one_documentation_source_alone_is_enough():
+    """
+    The CCTP case. Circle is the only publisher that documents CCTP, so no honest second
+    host exists; requiring one refused correct routes for a gap in the world. Four pages
+    on developers.circle.com still count as the one source they are — what changed is
+    that one is now sufficient.
+    """
+    from omnibridge.agent.contract import DEFAULT_ALLOWED_DOMAINS
+    from omnibridge.agent.provenance import verify_proposal
+
+    class _W3:
+        class eth:
+            @staticmethod
+            def get_code(_):
+                return bytes.fromhex("6fd3504e" + "00" * 64)
+
+    report = verify_proposal(
+        _W3(), ROUTER, SIGNATURE,
+        [
+            "https://developers.circle.com/cctp/references/contract-addresses",
+            "https://developers.circle.com/cctp/references/contract-interfaces",
+            "https://developers.circle.com/cctp/concepts/supported-chains-and-domains",
+        ],
+        allowed_domains=DEFAULT_ALLOWED_DOMAINS,
+    )
+    assert report.ok, report.failures
+    assert report.corroborating_domains == ["developers.circle.com"]
+
+
+def test_across_is_still_on_the_allowlist():
+    """
+    Regression. Two malformed URL entries without commas were concatenated with
+    "docs.across.to" by Python, silently removing Across from the allowlist — every
+    Across route would have been refused for having no documentation source at all.
+    """
+    from omnibridge.agent.contract import DEFAULT_ALLOWED_DOMAINS
+
+    assert "docs.across.to" in DEFAULT_ALLOWED_DOMAINS
+    # A full URL here matches nothing, since only hosts are compared.
+    assert not [d for d in DEFAULT_ALLOWED_DOMAINS if "/" in d]
 
 
 def test_a_route_with_no_documentation_source_is_refused_by_verify_proposal():

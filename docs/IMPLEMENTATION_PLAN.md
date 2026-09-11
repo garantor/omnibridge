@@ -614,7 +614,8 @@ Checks requiring no prior knowledge of the protocol:
 - **It implements what was claimed.** Compute the 4-byte selector from the proposed
   `function_signature` and require it in the deployed runtime bytecode. Generic across every
   protocol; imperfect against proxies, but a real signal for one RPC call.
-- **Corroboration.** The address must appear in at least two independent sources to be eligible.
+- **Corroboration.** The address must be named by at least one host on the documentation
+  allowlist to be eligible. Block explorers corroborate but never substitute for it.
 - **Domain allowlist** on search and fetch — operator security configuration, encoding no
   per-bridge behaviour.
 - **Sources in the manifest**, beside the resolved chain identity from 1.6.

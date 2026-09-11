@@ -89,8 +89,8 @@ warning for **any source the model cited that grounding never retrieved** — th
 that would otherwise satisfy corroboration invisibly.
 
 Everything downstream is unchanged: the selector is still recomputed, the router's
-bytecode still has to contain it, two independent sources are still required, and a
-real `eth_call` still has to pass before a human sees anything.
+bytecode still has to contain it, a source on the documentation allowlist is still
+required, and a real `eth_call` still has to pass before a human sees anything.
 
 ## Adding a provider
 
@@ -124,9 +124,11 @@ What varies is enforcement:
   `_check_shape` instead — still safe, just noisier.
 - **Search.** Anthropic's `web_search_20260209` / `web_fetch_20260209` run server-side
   with a per-request domain allowlist. A provider using a grounding API with weaker
-  source attribution will find `MIN_CORROBORATING_SOURCES = 2` harder to satisfy
-  honestly. **Verify that before trusting it, not after** — a provider that cites
-  plausible URLs it did not read defeats the corroboration check while appearing to pass.
+  source attribution cannot prove it read what it cites. Since
+  `MIN_CORROBORATING_SOURCES = 1`, the documentation allowlist is the whole trust
+  boundary. **Verify a provider's sourcing before trusting it, not after** — one that
+  cites a plausible allowlisted URL it never opened now passes sourcing on its own word,
+  and only the on-chain selector and bytecode checks are left to catch it.
 - **Refusals and pauses.** `pause_turn` and refusal blocks are Anthropic-shaped. Other
   APIs signal these differently, or not at all.
 

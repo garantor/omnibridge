@@ -25,7 +25,22 @@ EIP1967_IMPLEMENTATION_SLOT = (
 )
 
 # Minimum independent sources that must name a router address before it is eligible.
-MIN_CORROBORATING_SOURCES = 2
+#
+# One, deliberately. The tier rule below is what carries the weight: a route must be
+# named by a host on the documentation allowlist, and that allowlist is curated by hand.
+# Requiring a *second* host on top of that was unsatisfiable for single-publisher
+# protocols — CCTP is documented only by Circle, so no honest second source exists, and
+# correct routes were refused for a gap in the world rather than a fault in the route.
+#
+# What still stands between a wrong page and a signature: the address must hold
+# bytecode, that bytecode (or its EIP-1967 implementation) must contain the selector for
+# the exact function claimed, and a real eth_call must pass before a human is shown
+# anything. Those are on-chain facts and none of them come from the page.
+#
+# What this gives up, stated plainly: a compromised, stale or mistaken page on an
+# allowlisted domain is no longer contradicted by anything. The allowlist is now the
+# trust boundary, so treat adding a domain to it as a security decision.
+MIN_CORROBORATING_SOURCES = 1
 
 # Sources come in two tiers, because they answer different questions.
 #
@@ -302,7 +317,7 @@ def verify_proposal(
     elif len(checked["corroborating"]) < min_sources:
         report.failures.append(
             f"Router named by {len(checked['corroborating'])} independent source(s); "
-            f"{min_sources} required. A single page is a claim, not evidence."
+            f"{min_sources} required."
         )
 
     if checked["unretrieved_citations"]:

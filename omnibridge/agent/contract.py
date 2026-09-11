@@ -29,10 +29,14 @@ from typing import Any, Dict, List, Optional
 # tutorial being cited as protocol documentation.
 DEFAULT_ALLOWED_DOMAINS = [
     "developers.circle.com",
-    'https://developers.circle.com/ai/mcp'
-    'https://github.com/circlefin/skills'
-
-    
+    # Bare hostnames only. `check_sources` compares a cited URL's *host* against this
+    # list, so a full URL here matches nothing and is dead weight. Two such entries sat
+    # here — developers.circle.com/ai/mcp, already covered by the host above, and
+    # github.com/circlefin/skills.
+    #
+    # github.com is deliberately absent rather than added: a host entry cannot express
+    # "this one repository", and now that a single documentation source is sufficient,
+    # listing it would make every repository on GitHub an authority on router addresses.
     "docs.across.to",
     "docs.layerzero.network",
     "docs.wormhole.com",
