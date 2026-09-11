@@ -27,6 +27,11 @@ spend:
   token: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831'
   spender: '0x19330d10D9Cc8751218eaf51E8885D058642E08A'
   amount: '5000000'
+source_aliases:
+- arbitrum
+- arbitrum one
+dest_aliases:
+- base
 aliases:
 - arbitrum
 - arbitrum one
