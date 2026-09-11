@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from langgraph.types import Command
 from graph import graph, skill_mgr
-from omnibridge.steplog import LOG_BUS, run_context
+from omnibridge.steplog import LOG_BUS, format_duration, run_context
 
 server_app = FastAPI(
     title="LangGraph Web3 Bridging Gateway",
@@ -141,10 +141,27 @@ def health():
     return {"status": "HEALTHY", "runtime": "LangGraph State Machine Engine"}
 
 
-def _close_log_stream(run_id: Optional[str]) -> None:
-    """Tell any watcher the run is over, so the browser closes rather than hanging."""
-    if run_id:
-        LOG_BUS.publish(run_id, {"_end": True})
+def _close_log_stream(run_id: Optional[str], started: Optional[float] = None) -> None:
+    """
+    Tell any watcher the run is over, so the browser closes rather than hanging.
+
+    When the caller knows when the run began, the last record is how long it took. Every
+    other line is timed from the start of its own stage, so without this the trail says
+    what each stage cost and never what the run did.
+    """
+    if not run_id:
+        return
+    if started is not None:
+        elapsed = time.monotonic() - started
+        LOG_BUS.publish(run_id, {
+            "t": round(elapsed, 2),
+            "total": round(elapsed, 2),
+            "marker": "✓",
+            "level": "green",
+            "scope": "run",
+            "message": f"finished in {format_duration(elapsed)}",
+        })
+    LOG_BUS.publish(run_id, {"_end": True})
 
 
 def _state_response(thread_id: str, values: dict) -> dict:
@@ -222,6 +239,8 @@ def start_bridge_flow(req: StartBridgeRequest):
         "retry_count": 0,
     }
 
+    started = time.monotonic()
+
     try:
         with run_context(req.runId):
             for _event in graph.stream(initial_state, config=config):
@@ -237,18 +256,24 @@ def start_bridge_flow(req: StartBridgeRequest):
         response = _state_response(thread_id, partial)
         response["status"] = "ERROR"
         response["error"] = str(exc)
-        _close_log_stream(req.runId)
+        # Reported on every path, including this one: how long a run took before it
+        # failed is exactly what you want when it failed slowly.
+        response["duration_seconds"] = round(time.monotonic() - started, 2)
+        _close_log_stream(req.runId, started)
         return response
 
     snapshot = graph.get_state(config)
     if snapshot.tasks and snapshot.tasks[0].interrupts:
         payload = dict(snapshot.tasks[0].interrupts[0].value)
         payload["thread_id"] = thread_id
-        _close_log_stream(req.runId)
+        payload["duration_seconds"] = round(time.monotonic() - started, 2)
+        _close_log_stream(req.runId, started)
         return payload
 
-    _close_log_stream(req.runId)
-    return _state_response(thread_id, snapshot.values or {})
+    response = _state_response(thread_id, snapshot.values or {})
+    response["duration_seconds"] = round(time.monotonic() - started, 2)
+    _close_log_stream(req.runId, started)
+    return response
 
 
 @server_app.post("/api/bridge/resume")

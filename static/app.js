@@ -67,6 +67,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const logStream = document.getElementById("log-stream");
   const logAutoscroll = document.getElementById("log-autoscroll");
   const logCopyBtn = document.getElementById("log-copy-btn");
+  const logDuration = document.getElementById("log-duration");
 
   let userConnectedAddress = null;
   let currentThreadId = null;
@@ -336,18 +337,30 @@ document.addEventListener("DOMContentLoaded", () => {
   function resetLog() {
     logLines.length = 0;
     logStream.textContent = "";
+    if (logDuration) logDuration.textContent = "";
     logSection.classList.remove("hidden");
+  }
+
+  function showRunDuration(seconds) {
+    const pretty = formatDuration(seconds);
+    if (logDuration) logDuration.textContent = pretty ? `— finished in ${pretty}` : "";
   }
 
   function appendLogRecord(rec) {
     const cls = LEVEL_CLASS[rec.level] || "log-detail";
-    const line = `${String(rec.t).padStart(6)}s ${rec.marker} ${rec.scope}  ${rec.message}`;
+    // Two clocks, because they answer different questions. `t` is how far into its own
+    // stage a step happened — every stage restarts at zero — and `total` is how far
+    // into the run. Reading elapsed time off `t` alone was impossible.
+    const hasTotal = rec.total !== null && rec.total !== undefined;
+    const line = `${String(rec.t).padStart(6)}s ${hasTotal ? `[${String(rec.total).padStart(6)}s] ` : ""}`
+      + `${rec.marker} ${rec.scope}  ${rec.message}`;
     logLines.push(line);
 
     const el = document.createElement("div");
     el.className = `log-line ${cls}`;
     el.innerHTML =
       `<span class="log-t">${String(rec.t).padStart(6)}s</span>` +
+      (hasTotal ? `<span class="log-total" title="elapsed since the run started">${String(rec.total).padStart(6)}s</span>` : `<span class="log-total"></span>`) +
       `<span class="log-marker">${esc(rec.marker)}</span>` +
       `<span class="log-scope">${esc(rec.scope)}</span>` +
       `<span class="log-msg">${esc(rec.message)}</span>`;
@@ -428,6 +441,27 @@ document.addEventListener("DOMContentLoaded", () => {
       label: `⚠ ${status || "Unknown"}`,
       note: "Simulation status is unknown. Treat this transaction as unverified.",
     };
+  }
+
+  // Chain ids the wallet is configured for, by id. Kept next to explorerTxUrl because
+  // both answer "what is this chain" and drifting apart would be silent.
+  const CHAIN_LABELS = { 1: "Ethereum Mainnet", 10: "Optimism", 137: "Polygon",
+                         8453: "Base", 42161: "Arbitrum One" };
+
+  function formatDuration(seconds) {
+    if (seconds === null || seconds === undefined) return null;
+    const n = Number(seconds);
+    if (!isFinite(n)) return null;
+    if (n < 10) return `${n.toFixed(2)}s`;
+    if (n < 60) return `${n.toFixed(1)}s`;
+    const m = Math.floor(Math.round(n) / 60);
+    const r = Math.round(n) % 60;
+    return `${m}m ${String(r).padStart(2, "0")}s`;
+  }
+
+  function chainLabel(chainId) {
+    const id = Number(chainId);
+    return CHAIN_LABELS[id] || (id ? `chain ${id}` : "an unknown network");
   }
 
   function explorerTxUrl(chainId, txHash) {
@@ -890,6 +924,9 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
 
       const data = await response.json();
       closeLogStream();
+      // Reported on every outcome, including failures — a run that took two minutes to
+      // refuse is worth knowing about as much as one that took two minutes to succeed.
+      showRunDuration(data.duration_seconds);
       syncPipeline(data);
 
       console.groupCollapsed("🌉 Omnibridge execution telemetry");
@@ -967,6 +1004,53 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
     const primaryWallet = connectedWallets[0];
     const fromAddress = primaryWallet.accounts[0].address;
     const provider = primaryWallet.provider;
+
+    // The wallet's network decides where this lands, and nothing above here has
+    // consulted it. eth_sendTransaction carries no chain id: it executes on whatever
+    // network the wallet happens to be on, which for a fresh MetaMask is Ethereum
+    // Mainnet regardless of the route. The router address, the calldata and the
+    // simulation are all specific to the source chain, so signing on the wrong one
+    // sends real funds to an address that on that chain is a different contract, or
+    // no contract at all. Refuse rather than hope.
+    if (!currentSourceChainId) {
+      signBtn.disabled = false;
+      signBtn.innerHTML = `<span>Sign in Wallet & Broadcast</span><span>🚀</span>`;
+      outputSection.insertAdjacentHTML("afterbegin",
+        `<div class="banner banner-rose"><strong>Not signable:</strong> the route did not
+         report a source chain id, so the target network cannot be confirmed.
+         Nothing was sent.</div>`);
+      return;
+    }
+
+    const wantChainHex = "0x" + Number(currentSourceChainId).toString(16);
+    const walletChainHex = (primaryWallet.chains && primaryWallet.chains[0]
+      && primaryWallet.chains[0].id) || null;
+
+    if (!walletChainHex || walletChainHex.toLowerCase() !== wantChainHex.toLowerCase()) {
+      signBtn.innerHTML = `<span>Switching your wallet to ${esc(chainLabel(currentSourceChainId))}…</span>`;
+      let switched = false;
+      try {
+        switched = await onboard.setChain({ chainId: wantChainHex });
+      } catch (switchErr) {
+        switched = false;
+      }
+      // setChain resolves false when the user declines or the wallet does not carry the
+      // network. Either way the wallet is still on the wrong chain, so stop here.
+      const nowHex = ((onboard.state.get().wallets[0] || {}).chains || [{}])[0].id || null;
+      if (!switched || !nowHex || nowHex.toLowerCase() !== wantChainHex.toLowerCase()) {
+        signBtn.disabled = false;
+        signBtn.innerHTML = `<span>Sign in Wallet & Broadcast</span><span>🚀</span>`;
+        setStepActive(5);
+        outputSection.insertAdjacentHTML("afterbegin",
+          `<div class="banner banner-rose"><strong>Wrong network:</strong> this route runs on
+           ${esc(chainLabel(currentSourceChainId))} (chain ${esc(String(currentSourceChainId))}),
+           but your wallet is on ${esc(chainLabel(parseInt(walletChainHex || "0", 16)))}.
+           The router address and the simulation are specific to
+           ${esc(chainLabel(currentSourceChainId))}. Switch networks in your wallet and
+           sign again — nothing was sent.</div>`);
+        return;
+      }
+    }
 
     signBtn.disabled = true;
     signBtn.innerHTML = `<span>Awaiting signature in ${esc(primaryWallet.label || "your wallet")}…</span>`;

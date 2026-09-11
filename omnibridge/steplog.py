@@ -101,19 +101,48 @@ LOG_BUS = LogBus()
 #: The run the current thread's log records belong to, if any.
 _CURRENT_RUN: ContextVar[Optional[str]] = ContextVar("omnibridge_run_id", default=None)
 
+#: When the current run began, for a wall-clock total across every stage.
+#
+# Each StepLogger times from its own construction, so the trail restarts at 0.00s for
+# every stage and there was no way to read the cost of a whole run off it — a 49s
+# research call and a 0.4s RPC race both begin at zero. This clock spans the run, so a
+# record carries both: `t` is how far into its own stage a step happened, `total` is how
+# far into the run.
+_RUN_STARTED: ContextVar[Optional[float]] = ContextVar("omnibridge_run_started", default=None)
+
 
 @contextmanager
 def run_context(run_id: Optional[str]) -> Iterator[None]:
-    """Attribute every step record emitted inside this block to `run_id`."""
+    """Attribute every step record emitted inside this block to `run_id`, and time it."""
     token = _CURRENT_RUN.set(run_id)
+    clock = _RUN_STARTED.set(time.monotonic())
     try:
         yield
     finally:
         _CURRENT_RUN.reset(token)
+        _RUN_STARTED.reset(clock)
 
 
 def current_run() -> Optional[str]:
     return _CURRENT_RUN.get()
+
+
+def run_elapsed() -> Optional[float]:
+    """Seconds since the current run began, or None outside a run context."""
+    started = _RUN_STARTED.get()
+    return None if started is None else time.monotonic() - started
+
+
+def format_duration(seconds: Optional[float]) -> str:
+    """A duration a human reads at a glance: 0.42s, 57.5s, 2m 04s."""
+    if seconds is None:
+        return "unknown"
+    if seconds < 10:
+        return f"{seconds:.2f}s"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, rest = divmod(int(round(seconds)), 60)
+    return f"{minutes}m {rest:02d}s"
 
 
 class StepLogger:
@@ -132,9 +161,13 @@ class StepLogger:
         # Published first, and regardless of the console level. A browser watching a
         # run should not go blank because the server was started with OMNIBRIDGE_LOG=quiet.
         run_id = current_run()
+        total = run_elapsed()
         if run_id:
             LOG_BUS.publish(run_id, {
                 "t": round(elapsed, 2),
+                # Seconds into the whole run, not just this stage. Absent outside a run
+                # context, which the browser renders as no total rather than as zero.
+                "total": None if total is None else round(total, 2),
                 "marker": marker.strip() or "·",
                 "level": style,
                 "scope": self.scope,

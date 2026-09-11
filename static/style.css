@@ -833,6 +833,13 @@ body {
    --------------------------------------------------------------------------- */
 
 .log-section { margin-bottom: 1.5rem; }
+.log-duration {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-left: 0.5rem;
+}
 .log-actions { display: flex; align-items: center; gap: 0.75rem; }
 .log-toggle {
   font-size: 0.78rem;
@@ -860,6 +867,9 @@ body {
 
 .log-line { display: flex; gap: 0.6rem; align-items: baseline; }
 .log-t      { color: var(--text-muted); flex: none; }
+/* Elapsed since the run started, beside the per-stage clock. Dimmer, and a fixed width
+   so lines stay aligned on the records that carry no total. */
+.log-total  { color: var(--text-muted); flex: none; opacity: 0.55; min-width: 7ch; }
 .log-marker { flex: none; width: 1ch; font-weight: 700; }
 .log-scope  { color: var(--text-muted); flex: none; min-width: 9ch; }
 .log-msg    { white-space: pre-wrap; word-break: break-word; }
