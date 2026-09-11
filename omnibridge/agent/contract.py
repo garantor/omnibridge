@@ -56,6 +56,27 @@ DEFAULT_ALLOWED_DOMAINS = [
 ]
 
 
+def format_chain_ref(ref: Any) -> str:
+    """
+    A destination reference as a human reads it: "cctp_domain 6".
+
+    The reference is a dict because the scheme is load-bearing — CCTP domain 6 and
+    EIP-155 chain 6 are different chains — but printing the dict itself puts Python
+    syntax in a manifest and in the console.
+    """
+    if not ref:
+        return ""
+    if isinstance(ref, str):
+        return ref
+    if isinstance(ref, dict):
+        scheme = str(ref.get("scheme") or "").strip()
+        value = str(ref.get("value") or "").strip()
+        if scheme and value:
+            return f"{scheme} {value}"
+        return value or scheme
+    return str(ref)
+
+
 def allowed_domains() -> List[str]:
     """Documentation hosts the model may read, overridable for testing."""
     override = os.environ.get("OMNIBRIDGE_ALLOWED_DOMAINS")

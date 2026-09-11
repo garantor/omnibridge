@@ -1183,6 +1183,10 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
               <div class="manifest-val mono">${esc(resData.skill_persisted) || '<span class="muted">none written</span>'}</div>
             </div>
           </div>
+          ${resData.skill_save_error ? `
+          <p class="subtitle">The transfer went through; caching it for next time did not
+             (<code>${esc(resData.skill_save_error)}</code>). Nothing about this transaction
+             is affected — the route will simply be rediscovered on the next request.</p>` : ""}
         </div>
         ${renderTelemetryCards(resData.traces, resData)}`;
 

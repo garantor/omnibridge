@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from langgraph.types import Command
 from graph import graph, skill_mgr
+from omnibridge.agent.contract import format_chain_ref
 from omnibridge.steplog import LOG_BUS, format_duration, run_context
 
 server_app = FastAPI(
@@ -321,6 +322,9 @@ def resume_bridge_flow(req: ResumeBridgeRequest):
     response = _state_response(req.thread_id, final)
     response["tx_hash"] = final.get("tx_hash")
     response["skill_persisted"] = final.get("skill_path")
+    # A transfer that went through but could not be cached is a success with a caveat,
+    # never a failure. Reported so the browser can say so rather than staying silent.
+    response["skill_save_error"] = final.get("skill_save_error")
     response["explorer_url"] = (final.get("traces", {}).get("step_6_broadcast") or {}).get(
         "explorer_url"
     )
@@ -492,7 +496,7 @@ def list_skills():
             "name": s.metadata.name,
             "description": s.metadata.description,
             "source": s.metadata.source_chain,
-            "destination": s.metadata.dest_chain_ref or s.metadata.dest_chain,
+            "destination": format_chain_ref(s.metadata.dest_chain_ref) or s.metadata.dest_chain,
             "token": s.metadata.token,
             "protocol": s.metadata.bridge_protocol,
             "router": s.metadata.router_address,

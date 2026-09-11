@@ -325,3 +325,56 @@ def test_the_demotion_record_survives_the_retry(tmp_path, monkeypatch):
     record = second["traces"]["step_error"]
     assert record["demoted_skill"], "the demotion was erased by the retry"
     assert len(record["attempts"]) == 2
+
+
+# ------------------------------------------------- a destination is a structured ref
+
+
+def test_a_structured_destination_reference_survives_a_round_trip(tmp_path):
+    """
+    The regression. Every agent route carries dest_chain_ref as
+    {"scheme": "cctp_domain", "value": "6"}, but SkillMetadata typed it as a string, so
+    saving raised a validation error — after the transaction had been broadcast.
+    """
+    from omnibridge.skills.manager import SkillManager, SkillMetadata
+
+    mgr = SkillManager(repository_path=str(tmp_path))
+    ref = {"scheme": "cctp_domain", "value": "6"}
+    meta = SkillMetadata(
+        name="arbitrum_to_base_usdc",
+        description="d",
+        source_chain="Arbitrum One",
+        source_chain_id=42161,
+        dest_chain="Base",
+        dest_chain_ref=ref,
+        token="USDC",
+        bridge_protocol="Circle CCTP",
+        router_address="0x19330d10D9Cc8751218eaf51E8885D058642E08A",
+    )
+    assert meta.dest_chain_ref == ref
+
+    path = mgr.save_skill(meta, "body", target_dir=str(tmp_path / "arbitrum_to_base_usdc"))
+    reloaded = mgr._parse_skill_file(Path(path))
+    assert reloaded is not None, "the saved skill must parse back"
+    assert reloaded.metadata.dest_chain_ref == ref
+
+
+def test_a_legacy_string_reference_still_loads():
+    """A hand-written value must not make the whole skill unreadable."""
+    from omnibridge.skills.manager import SkillMetadata
+
+    meta = SkillMetadata(
+        name="n", description="d", source_chain="Arbitrum One", source_chain_id=42161,
+        dest_chain="Base", dest_chain_ref="6", token="USDC",
+        bridge_protocol="p", router_address="0x0000000000000000000000000000000000000001",
+    )
+    # Recorded as unknown rather than guessed as a CCTP domain.
+    assert meta.dest_chain_ref == {"scheme": "unknown", "value": "6"}
+
+
+def test_a_reference_is_rendered_for_a_human():
+    from omnibridge.agent.contract import format_chain_ref
+
+    assert format_chain_ref({"scheme": "cctp_domain", "value": "6"}) == "cctp_domain 6"
+    assert format_chain_ref({"value": "6"}) == "6"
+    assert format_chain_ref(None) == ""

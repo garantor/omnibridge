@@ -17,6 +17,7 @@ from omnibridge.core.executor import CalldataExecutor
 from omnibridge.core.simulator import Simulator, is_evm_address
 from omnibridge.core.models import SimulationStatus
 from omnibridge.core.signer import Signer
+from omnibridge.agent.contract import format_chain_ref
 
 
 class GraphState(TypedDict):
@@ -36,6 +37,9 @@ class GraphState(TypedDict):
     signed_transaction_hex: Optional[str]
     tx_hash: Optional[str]
     skill_path: Optional[str]
+    # Why no skill was written, when the transfer itself succeeded. Kept separate from
+    # `error`, which is about the transfer.
+    skill_save_error: Optional[str]
     error: Optional[str]
     traces: Dict[str, Any]
     # Retry edge (plan 3.4): a revert is feedback, not a terminus.
@@ -341,7 +345,8 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
         f"[bold green]Function:[/bold green] {quote.extra_params.get('function_signature')}\n"
         f"[bold green]Active Selected RPC:[/bold green] [cyan]{fastest_rpc}[/cyan]\n"
         f"[bold green]Source Chain ID:[/bold green] {quote.source_chain_id}\n"
-        f"[bold green]Destination:[/bold green] {quote.extra_params.get('dest_chain_ref') or quote.dest_chain_id}\n"
+        f"[bold green]Destination:[/bold green] "
+        f"{format_chain_ref(quote.extra_params.get('dest_chain_ref')) or quote.dest_chain_id}\n"
         f"[dim]Replayed from skill memory. It still has to clear simulation — a skill is a "
         f"shortcut past discovery, never past the guardrails.[/dim]",
         title="[bold green]📋 [STEP 2: CACHED ROUTE REPLAYED FROM SKILL MEMORY][/bold green]",
@@ -1013,7 +1018,53 @@ def broadcast_skill_node(state: GraphState) -> Dict[str, Any]:
 
     receipt = signer.broadcast_transaction(tx_payload, private_key=None, dry_run=False)
 
-    # Persist SKILL.md — the write-back that makes the second identical request free.
+    # Past this line the transfer has happened. Everything below is bookkeeping, and
+    # bookkeeping is not allowed to decide whether a broadcast counts: an exception here
+    # used to propagate out of the node and land the run in REJECTED with the user's
+    # transaction already mined. The status reports what the chain did; a failed
+    # write-back is reported alongside it, not instead of it.
+    try:
+        skill_path = _persist_route_as_skill(state, receipt)
+        skill_error = None
+    except Exception as exc:
+        from omnibridge.steplog import StepLogger
+
+        skill_path = None
+        skill_error = f"{type(exc).__name__}: {exc}"
+        StepLogger("broadcast").warn(
+            f"transaction {receipt.tx_hash} is on chain, but the skill was not saved "
+            f"({skill_error}). The route will be rediscovered next time."
+        )
+
+    traces = state.get("traces", {})
+    traces["step_6_broadcast"] = {
+        "title": "On-Chain Broadcast & SKILL.md Registration",
+        "tx_hash": receipt.tx_hash,
+        "explorer_url": receipt.explorer_url,
+        "persisted_skill_path": skill_path,
+        # Named rather than implied by a null path, so "not saved" is distinguishable
+        # from "saved somewhere this response did not carry".
+        "skill_save_error": skill_error,
+        "status": "COMPLETED" if skill_error is None else "COMPLETED_WITHOUT_SKILL",
+    }
+
+    return {
+        "status": "CONFIRMED",
+        "tx_hash": receipt.tx_hash,
+        "skill_path": skill_path,
+        "skill_save_error": skill_error,
+        "traces": traces,
+    }
+
+
+def _persist_route_as_skill(state: GraphState, receipt: Any) -> str:
+    """
+    Write the SKILL.md that makes the second identical request free.
+
+    Split out of the broadcast node so its failures are catchable there. It runs after
+    the transaction is already on chain, so nothing it does may raise past its caller.
+    """
+    src_chain_info = rpc_mgr.discover_chain_metadata(state["source_chain"])
     quote = RouteQuote(**state["route"]["quote_obj"])
     params = quote.extra_params or {}
     src_name = state["source_chain"]
@@ -1077,7 +1128,7 @@ def broadcast_skill_node(state: GraphState) -> Dict[str, Any]:
 - **Protocol:** {metadata.bridge_protocol}
 - **Router:** `{metadata.router_address}`
 - **Function:** `{metadata.function_signature}`
-- **Destination:** {dest_chain_ref or dest_chain_id or dst_name}
+- **Destination:** {format_chain_ref(dest_chain_ref) or dest_chain_id or dst_name}
 
 ## Parameters
 Encoded through `CalldataExecutor.encode_dynamic_calldata`. Placeholders are bound per
@@ -1100,23 +1151,9 @@ A cache hit skips discovery, not the guardrails: a replay is re-simulated and
 re-approved before it can send anything.
 """
 
-    skill_path = skill_mgr.save_skill(metadata, skill_body, target_dir=str(LOCAL_SKILLS_DIR / skill_name))
-
-    traces = state.get("traces", {})
-    traces["step_6_broadcast"] = {
-        "title": "On-Chain Broadcast & SKILL.md Registration",
-        "tx_hash": receipt.tx_hash,
-        "explorer_url": receipt.explorer_url,
-        "persisted_skill_path": skill_path,
-        "status": "COMPLETED",
-    }
-
-    return {
-        "status": "CONFIRMED",
-        "tx_hash": receipt.tx_hash,
-        "skill_path": skill_path,
-        "traces": traces,
-    }
+    return skill_mgr.save_skill(
+        metadata, skill_body, target_dir=str(LOCAL_SKILLS_DIR / skill_name)
+    )
 
 
 def error_node(state: GraphState) -> Dict[str, Any]:

@@ -19,9 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # The repository the running system reads and writes. It sits at the project root
@@ -51,13 +51,33 @@ class SkillMetadata(BaseModel):
     # Optional because a destination that is not EIP-155 addressable has no chain id,
     # and inventing one is exactly the failure `dest_chain_ref` exists to avoid.
     dest_chain_id: Optional[int] = None
-    dest_chain_ref: Optional[str] = None
+    # A structured reference, not a string: {"scheme": "cctp_domain", "value": "6"}.
+    # Every other carrier of this field — RouteProposal, RouteQuote.extra_params, the
+    # approval payload — has always held the dict, and the scheme is the whole point
+    # (a CCTP domain of 6 and an EIP-155 id of 6 are different chains). Typing it as a
+    # string here meant every successful agent route raised a validation error while
+    # saving its skill — after the transaction had already been broadcast.
+    dest_chain_ref: Optional[Dict[str, Any]] = None
     token: str
     bridge_protocol: str
     router_address: str
     source_token_address: Optional[str] = None
     dest_token_address: Optional[str] = None
     cctp_destination_domain: Optional[int] = None
+
+    @field_validator("dest_chain_ref", mode="before")
+    @classmethod
+    def _accept_a_bare_reference(cls, value: Any) -> Any:
+        """
+        Take a hand-written or legacy string without refusing to load the skill.
+
+        The scheme is unrecoverable from a bare value, so it is recorded as unknown
+        instead of guessed — a reader can tell the difference between "this is a CCTP
+        domain" and "this is a number somebody wrote down".
+        """
+        if isinstance(value, str):
+            return {"scheme": "unknown", "value": value}
+        return value
 
     # Network family. A mainnet skill must never answer a testnet request; before this
     # existed, substring matching let "base" serve "base sepolia".
