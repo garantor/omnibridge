@@ -60,6 +60,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const outputSection = document.getElementById("output-section");
   const skillsGrid = document.getElementById("skills-grid");
   const refreshSkillsBtn = document.getElementById("refresh-skills-btn");
+  const recipientInput = document.getElementById("recipient-input");
   const connectWalletBtn = document.getElementById("connect-wallet-btn");
   const walletBtnText = document.getElementById("wallet-btn-text");
   const chips = document.querySelectorAll(".chip");
@@ -794,6 +795,21 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
       </div>`;
   }
 
+  // Sending to someone else is legitimate and irreversible, so it is stated at the top
+  // of the approval rather than left to be inferred from an address in a parameter
+  // list. Nothing is blocked — the user asked for this — but it is never quiet.
+  function renderThirdPartyRecipient(parties) {
+    if (!parties || parties.recipient_is_sender) return "";
+    return `
+      <div class="banner banner-amber">
+        <strong>These funds are not going to your wallet.</strong>
+        They will arrive at <code>${esc(parties.recipient)}</code>, not
+        <code>${esc(parties.sender)}</code>. That address was verified to be present in
+        the transaction you are about to sign, but nothing can recover a transfer sent
+        to the wrong address — check it character by character.
+      </div>`;
+  }
+
   function renderApproval(data) {
     const v = simVerdict(data.verification && data.verification.simulation_status);
     const route = data.route || {};
@@ -809,6 +825,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
         </div>
 
         ${renderAmountCheck(amount)}
+        ${renderThirdPartyRecipient(data.parties)}
         ${renderPlan(data.plan)}
 
         <div class="manifest-grid">
@@ -882,6 +899,22 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
     const query = intentInput.value.trim();
     if (!query) return;
 
+    // Checked here as well as on the server. A typo in an address is the one mistake in
+    // this form that nobody can undo, so it is caught before a minute of discovery runs
+    // rather than after.
+    const recipientValue = (recipientInput ? recipientInput.value : "").trim();
+    if (recipientValue && !/^0x[a-fA-F0-9]{40}$/.test(recipientValue)) {
+      outputSection.classList.remove("hidden");
+      outputSection.innerHTML = `
+        <div class="verdict verdict-rose">
+          <h3>That recipient is not a valid address</h3>
+          <p><code>${esc(recipientValue)}</code> is not a 0x-prefixed, 40-character EVM
+             address. Nothing was started.</p>
+          <p class="subtitle">Leave the field empty to send to your own wallet.</p>
+        </div>`;
+      return;
+    }
+
     resetPipeline();
     setStepActive(1);
     outputSection.classList.remove("hidden");
@@ -919,7 +952,14 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
       const response = await fetch("/api/bridge/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: query, userAddress: userConnectedAddress, runId: currentRunId }),
+        body: JSON.stringify({
+          input: query,
+          userAddress: userConnectedAddress,
+          // Sent only when actually filled in, so an empty box means "me" rather than
+          // an empty string the server has to interpret.
+          recipient: recipientValue || undefined,
+          runId: currentRunId,
+        }),
       });
 
       const data = await response.json();

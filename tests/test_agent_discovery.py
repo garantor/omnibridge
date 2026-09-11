@@ -617,3 +617,122 @@ def test_the_attempt_ceiling_now_actually_binds():
     budget = RequestBudget.restore(budget.as_dict())
     with pytest.raises(BudgetExceeded):
         budget.start_attempt()
+
+
+# ------------------------------------------------------- a nominated recipient
+
+
+def _proposal_with_recipient(addr):
+    from omnibridge.agent.discovery_agent import RouteProposal
+
+    return RouteProposal(
+        protocol="Circle CCTP",
+        router_address=ROUTER,
+        function_signature=SIGNATURE,
+        param_types=["uint256", "uint32", "bytes32", "address"],
+        param_values=[
+            "5000000",
+            "6",
+            "0x" + addr.lower().replace("0x", "").rjust(64, "0"),
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        ],
+        source_chain_id=42161,
+        dest_chain_ref={"scheme": "cctp_domain", "value": "6"},
+        sources=["https://developers.circle.com/cctp"],
+        rationale="r",
+    )
+
+
+def test_a_recipient_in_a_bytes32_parameter_is_found():
+    from omnibridge.agent.synthesis import _recipient_is_encoded
+
+    addr = "0xa397ef3874c89b3d2647d51ec7e64ea1a3f36628"
+    padded = "0x" + addr.replace("0x", "").rjust(64, "0")
+    assert _recipient_is_encoded(addr, ["5000000", "6", padded])
+    # Case must not matter; these arrive checksummed as often as not.
+    assert _recipient_is_encoded(addr.upper().replace("0X", "0x"), [padded])
+
+
+def test_an_absent_recipient_is_not_found():
+    from omnibridge.agent.synthesis import _recipient_is_encoded
+
+    assert not _recipient_is_encoded(
+        "0xa397ef3874c89b3d2647d51ec7e64ea1a3f36628",
+        ["5000000", "6", "0x" + "11" * 32],
+    )
+
+
+def test_a_third_party_recipient_missing_from_the_calldata_is_refused():
+    """
+    The check that makes the recipient field mean anything. Provenance establishes the
+    router and simulation establishes the call is well-formed; a transfer to the wrong
+    destination passes both and the money is gone.
+    """
+    from omnibridge.agent.synthesis import ProposalRejected, synthesize
+    from omnibridge.core.models import UserIntent
+
+    sender = "0xa397ef3874c89b3d2647d51ec7e64ea1a3f36628"
+    asked_for = "0x1111111111111111111111111111111111111111"
+
+    class _Chain:
+        chain_id = 42161
+        name = "Arbitrum One"
+
+    intent = UserIntent(
+        token="USDC", amount=5.0, source_chain="arbitrum", dest_chain="base",
+        recipient=asked_for,
+    )
+    # The proposal encodes the sender, not the address the user named.
+    with pytest.raises(ProposalRejected) as err:
+        synthesize(_proposal_with_recipient(sender), intent, _Chain(), None, sender=sender)
+
+    assert asked_for in str(err.value)
+    assert "would go somewhere else" in str(err.value)
+
+
+def test_a_third_party_recipient_present_in_the_calldata_is_accepted():
+    from omnibridge.agent.synthesis import synthesize
+    from omnibridge.core.models import UserIntent
+
+    sender = "0xa397ef3874c89b3d2647d51ec7e64ea1a3f36628"
+    asked_for = "0x1111111111111111111111111111111111111111"
+
+    class _Chain:
+        chain_id = 42161
+        name = "Arbitrum One"
+
+    intent = UserIntent(
+        token="USDC", amount=5.0, source_chain="arbitrum", dest_chain="base",
+        recipient=asked_for,
+    )
+    _calldata, _quote, evidence = synthesize(
+        _proposal_with_recipient(asked_for), intent, _Chain(), None, sender=sender
+    )
+    assert evidence["recipient_encoded"] is True
+    assert evidence["recipient_is_third_party"] is True
+
+
+def test_sending_to_yourself_is_never_blocked_by_the_recipient_check():
+    """
+    Every route that worked before this check existed must still work. Some protocols
+    carry the destination somewhere the parameter list does not show, and refusing those
+    would break them — so a miss is only fatal when the user named someone else.
+    """
+    from omnibridge.agent.synthesis import synthesize
+    from omnibridge.core.models import UserIntent
+
+    sender = "0xa397ef3874c89b3d2647d51ec7e64ea1a3f36628"
+
+    class _Chain:
+        chain_id = 42161
+        name = "Arbitrum One"
+
+    intent = UserIntent(
+        token="USDC", amount=5.0, source_chain="arbitrum", dest_chain="base",
+        recipient=sender,
+    )
+    proposal = _proposal_with_recipient("0x2222222222222222222222222222222222222222")
+    _calldata, _quote, evidence = synthesize(proposal, intent, _Chain(), None, sender=sender)
+
+    assert evidence["recipient_is_third_party"] is False
+    assert evidence["recipient_encoded"] is False, "recorded, not fatal"

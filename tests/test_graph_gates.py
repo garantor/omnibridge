@@ -121,3 +121,68 @@ def test_a_failed_skill_save_does_not_reject_a_broadcast_transaction(monkeypatch
     step = out["traces"]["step_6_broadcast"]
     assert step["status"] == "COMPLETED_WITHOUT_SKILL"
     assert step["tx_hash"] == _Receipt.tx_hash
+
+
+# ---------------------------------------------------- recipient through the graph
+
+
+def _intent_state(**over):
+    base = {
+        "raw_input": "",
+        "source_chain": "arbitrum",
+        "target_chain": "base",
+        "amount": 5.0,
+        "asset": "USDC",
+        "user_address": "0xa397ef3874c89b3d2647d51ec7e64ea1a3f36628",
+        "traces": {},
+    }
+    base.update(over)
+    return base
+
+
+def test_no_recipient_means_the_sender():
+    import graph as g
+
+    out = g.intent_parser_node(_intent_state())
+    assert out["recipient"] is None
+    parsed = out["traces"]["step_1_intent"]["parsed_parameters"]
+    assert parsed["recipient"] == parsed["user_address"]
+    assert parsed["recipient_is_sender"] is True
+
+
+def test_a_nominated_recipient_is_carried_and_flagged():
+    import graph as g
+
+    other = "0x1111111111111111111111111111111111111111"
+    out = g.intent_parser_node(_intent_state(recipient=other))
+    assert out["recipient"] == other
+    assert out["traces"]["step_1_intent"]["parsed_parameters"]["recipient_is_sender"] is False
+
+
+def test_a_malformed_recipient_is_refused_rather_than_ignored():
+    """
+    Falling back to the sender would ignore the user on the one decision that says
+    where the money goes.
+    """
+    import graph as g
+
+    with pytest.raises(ValueError, match="not a valid EVM address"):
+        g.intent_parser_node(_intent_state(recipient="0xnope"))
+
+
+def test_a_destination_chain_is_never_read_as_a_recipient():
+    """"to base" is a chain. Only an explicit 0x address behind an explicit word counts."""
+    import graph as g
+
+    out = g.intent_parser_node(_intent_state(raw_input="Bridge 5 USDC from arbitrum to base"))
+    assert out["recipient"] is None
+
+
+def test_an_address_named_in_the_sentence_is_read_as_the_recipient():
+    import graph as g
+
+    other = "0x1111111111111111111111111111111111111111"
+    out = g.intent_parser_node(_intent_state(
+        raw_input=f"Bridge 5 USDC from arbitrum to base recipient {other}",
+    ))
+    assert out["recipient"] == other

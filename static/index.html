@@ -64,6 +64,27 @@
             </button>
           </div>
 
+          <!-- Optional recipient. Collapsed by default: sending to your own wallet is
+               the overwhelmingly common case and should stay a single field. -->
+          <details class="recipient-details">
+            <summary>Send to a different address</summary>
+            <label class="recipient-label" for="recipient-input">
+              Recipient on the destination chain
+            </label>
+            <input
+              type="text"
+              id="recipient-input"
+              class="recipient-input"
+              placeholder="0x… — leave empty to send to your own wallet"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p class="recipient-note">
+              Verified against the transaction before you are asked to sign. A transfer
+              to a wrong address cannot be recovered by anyone.
+            </p>
+          </details>
+
           <!-- Quick Templates -->
           <div class="quick-templates">
             <span class="quick-label">Quick suggestions:</span>

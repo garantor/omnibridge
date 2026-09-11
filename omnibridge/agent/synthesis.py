@@ -86,6 +86,29 @@ def _transfer_amount(proposal: RouteProposal, calldata: str) -> Optional[int]:
     return CalldataExecutor.decode_leading_uint256(calldata)
 
 
+def _recipient_is_encoded(recipient: str, param_values: List[Any]) -> bool:
+    """
+    Does the address the funds are meant for actually appear in what will be signed?
+
+    A bridge names its destination address in its parameters, as an `address` or as a
+    left-padded `bytes32` for chains whose addresses are not 20 bytes. Both forms are
+    checked, case-insensitively, with any padding stripped.
+
+    This is the one thing about a proposal that no other gate can catch. Provenance
+    establishes the *router*; simulation establishes the call is well-formed. A transfer
+    to the wrong destination passes both — eth_call succeeds, gas estimates fine — and
+    the money is simply gone.
+    """
+    if not recipient:
+        return False
+    needle = recipient.lower().removeprefix("0x").lstrip("0")
+    for value in param_values:
+        text = str(value).lower().removeprefix("0x")
+        if text.lstrip("0") == needle:
+            return True
+    return False
+
+
 def synthesize(
     proposal: RouteProposal,
     intent: UserIntent,
@@ -94,6 +117,7 @@ def synthesize(
     allowed_domains: Optional[List[str]] = None,
     decimals: int = 6,
     retrieved: Optional[List[str]] = None,
+    sender: Optional[str] = None,
 ) -> Tuple[str, RouteQuote, Dict[str, Any]]:
     """
     Check a proposal and encode it, or refuse.
@@ -137,6 +161,22 @@ def synthesize(
             f"{proposal.function_signature!r}."
         )
 
+    # A nominated recipient must be demonstrably in the transaction. When the recipient
+    # is the sender — every route before this was expressible — a miss is recorded and
+    # not fatal, because some protocols carry the destination somewhere this cannot see
+    # and refusing would break routes that work today. When the user named someone else,
+    # a miss is fatal: silently sending their funds back to themselves, or worse to an
+    # address the model chose, is the failure this whole check exists to prevent.
+    recipient = (intent.recipient or "").strip()
+    nominated = bool(recipient and sender and recipient.lower() != sender.lower())
+    recipient_encoded = _recipient_is_encoded(recipient, proposal.param_values)
+    if nominated and not recipient_encoded:
+        raise ProposalRejected(
+            f"The transfer names {recipient} as the recipient, but that address does not "
+            f"appear in the parameters the router would be called with "
+            f"({proposal.param_values}). The funds would go somewhere else. Refusing."
+        )
+
     raw_amount = _transfer_amount(proposal, calldata)
     quote = RouteQuote(
         bridge_name=proposal.protocol,
@@ -171,6 +211,11 @@ def synthesize(
     evidence = {
         "proposal": proposal.as_dict(),
         "selector_recomputed": selector,
+        # Stated either way, so a route where the destination could not be located in
+        # the calldata is visible rather than assumed correct.
+        "recipient_checked": recipient or None,
+        "recipient_encoded": recipient_encoded,
+        "recipient_is_third_party": nominated,
         "provenance": report.as_dict() if report else {"skipped": "no RPC supplied"},
         "calldata_bytes": (len(calldata) - 2) // 2,
     }

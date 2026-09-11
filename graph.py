@@ -27,6 +27,11 @@ class GraphState(TypedDict):
     amount: float
     asset: str
     user_address: str
+    # Where the bridged funds land. None means the sender, which is the overwhelmingly
+    # common case and the only one that used to be expressible. Kept distinct from
+    # user_address because they are different roles: one signs and pays, the other
+    # receives, and conflating them is what made a third-party recipient impossible.
+    recipient: Optional[str]
     slippage: str
     route: Optional[Dict[str, Any]]
     active_rpc: Optional[str]
@@ -87,6 +92,17 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
         )
     slip = state.get("slippage") or "0.5%"
 
+    # Optional, and validated as strictly as the sender. An unparseable recipient is
+    # refused rather than quietly falling back to the sender: someone who names a
+    # destination and gets their own address instead has been ignored on the one
+    # decision that says where the money goes.
+    recipient = (state.get("recipient") or "").strip()
+    if recipient and not is_evm_address(recipient):
+        raise ValueError(
+            f"Intent Error: recipient {recipient!r} is not a valid EVM address. "
+            "Supply a checksummed 0x address, or leave it empty to send to yourself."
+        )
+
     if raw:
         # The verb set is widened beyond the literal word "bridge". Where no destination
         # asset is named, swap/send/move/transfer all denote the same operation.
@@ -102,6 +118,19 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
                 tok = match.group(2).upper()
             src = match.group(3)
             dst = match.group(4)
+
+        # Only ever an explicit 0x address behind an explicit word. The chain regex above
+        # already owns "to <name>", so nothing here can turn a destination chain into a
+        # recipient, and a bare address floating in the sentence is not enough.
+        if not recipient:
+            named = re.search(
+                r"(?:recipient|receiver|beneficiary|payable to|send(?:ing)?\s+to|"
+                r"to\s+(?:address|wallet))\s+:?\s*(0x[a-fA-F0-9]{40})",
+                raw,
+                re.IGNORECASE,
+            )
+            if named:
+                recipient = named.group(1)
 
     # No defaults block. This previously substituted "Unknown"/"Unknown"/1.0 NATIVE for
     # anything it could not parse and then reported status "PARSED" / "COMPLETED", so
@@ -135,7 +164,9 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
         f"[bold white]Source Chain:[/bold white] {src}\n"
         f"[bold white]Target Chain:[/bold white] {dst}\n"
         f"[bold white]Amount & Asset:[/bold white] {amt} {tok}\n"
-        f"[bold white]Recipient / User Wallet:[/bold white] {user_addr}\n"
+        f"[bold white]Sender / Signer:[/bold white] {user_addr}\n"
+        f"[bold white]Recipient:[/bold white] "
+        f"{recipient + ' (NOT the sender)' if recipient and recipient.lower() != user_addr.lower() else user_addr}\n"
         f"[bold white]Slippage Tolerance:[/bold white] {slip}",
         title="[bold cyan]🧠 [STEP 1: INTENT & PARAMETER EXTRACTION][/bold cyan]",
         border_style="cyan"
@@ -151,6 +182,8 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
             "amount": amt,
             "asset": tok,
             "user_address": user_addr,
+            "recipient": recipient or user_addr,
+            "recipient_is_sender": not recipient or recipient.lower() == user_addr.lower(),
             "slippage": slip,
         },
         "status": "COMPLETED",
@@ -162,6 +195,7 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
         "amount": amt,
         "asset": tok,
         "user_address": user_addr,
+        "recipient": recipient or None,
         "slippage": slip,
         "status": "PARSED",
         "traces": traces,
@@ -295,7 +329,7 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
         amount=state["amount"],
         source_chain=state["source_chain"],
         dest_chain=state["target_chain"],
-        recipient=state["user_address"],
+        recipient=state.get("recipient") or state["user_address"],
     )
 
     # Tier 0: a verified skill short-circuits discovery entirely.
@@ -538,6 +572,8 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
             proposal, intent, src_info, w3,
             allowed_domains=agent.domains,
             retrieved=getattr(proposal, "retrieved", None) or None,
+            # Passed so synthesis can tell a third-party recipient from the default.
+            sender=state["user_address"],
         )
 
     prov = evidence.get("provenance") or {}
@@ -552,6 +588,17 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
         log.value("explorer sources", ", ".join(prov.get("secondary_domains") or []) or "none")
         for note in prov.get("notes") or []:
             log.warn(note)
+    # Where the money lands is worth a line of its own in the trail.
+    if evidence.get("recipient_is_third_party"):
+        log.warn(
+            f"recipient is NOT the sender: {evidence.get('recipient_checked')} "
+            "— confirmed present in the calldata"
+        )
+    elif not evidence.get("recipient_encoded"):
+        log.warn(
+            "the recipient could not be located in the calldata; the destination rests "
+            "on the model's encoding alone"
+        )
     log.value("selector recomputed", evidence.get("selector_recomputed"))
     log.ok(f"calldata built, {evidence.get('calldata_bytes')} bytes")
 
@@ -705,7 +752,7 @@ def code_builder_node(state: GraphState) -> Dict[str, Any]:
         amount=state["amount"],
         source_chain=state["source_chain"],
         dest_chain=state["target_chain"],
-        recipient=state["user_address"],
+        recipient=state.get("recipient") or state["user_address"],
     )
 
     # An agent proposal arrives already encoded, and already checked: synthesis
@@ -956,6 +1003,14 @@ def hitl_gate_node(state: GraphState) -> Dict[str, Any]:
             "dest_chain_ref": (quote_data.get("extra_params") or {}).get("dest_chain_ref"),
             "function_signature": (quote_data.get("extra_params") or {}).get("function_signature"),
         },
+        # Who signs and who receives, always both, so the approval screen can say when
+        # they differ instead of leaving the user to assume they do not.
+        "parties": {
+            "sender": state["user_address"],
+            "recipient": state.get("recipient") or state["user_address"],
+            "recipient_is_sender": not state.get("recipient")
+            or str(state["recipient"]).lower() == str(state["user_address"]).lower(),
+        },
         # What the human is actually authorising, and whether it matches what they asked
         # for. `decoded` is None when the calldata is not ABI-decodable — stated as
         # unverified rather than silently falling back to the requested figure.
@@ -1076,7 +1131,7 @@ def _persist_route_as_skill(state: GraphState, receipt: Any) -> str:
     stored_values = CalldataExecutor.generalise_param_values(
         list(params.get("param_values") or []),
         amount_raw=quote.deposit_amount_raw,
-        recipient=state["user_address"],
+        recipient=state.get("recipient") or state["user_address"],
         sender=state["user_address"],
     )
 

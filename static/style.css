@@ -881,3 +881,37 @@ body {
 .log-fail   .log-marker { color: var(--accent-rose); }
 .log-fail   .log-msg    { color: var(--on-rose); }
 .log-detail .log-msg    { color: var(--text-secondary); }
+
+
+/* Optional recipient. Folded away so the common case — sending to yourself — stays a
+   single input, and opened deliberately when it is not. */
+.recipient-details { margin-top: 0.9rem; }
+.recipient-details > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  user-select: none;
+}
+.recipient-details > summary:hover { color: var(--text-primary); }
+.recipient-label {
+  display: block;
+  margin: 0.7rem 0 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+.recipient-input {
+  width: 100%;
+  padding: 0.65rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input, var(--bg-secondary));
+  color: var(--text-primary);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.8rem;
+}
+.recipient-input:focus { outline: 2px solid var(--accent-cyan); outline-offset: 1px; }
+.recipient-note {
+  margin: 0.45rem 0 0;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}

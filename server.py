@@ -52,6 +52,15 @@ class StartBridgeRequest(BaseModel):
                     "account does not describe this transfer.",
         example="0x0000000000000000000000000000000000000000",
     )
+    #: Optional. Where the bridged funds land, when that is not the sender. Left unset
+    #: it is the sender, which is what every request meant before this existed. A value
+    #: here is verified against the calldata that would be signed, never merely passed
+    #: along — see synthesis._recipient_is_encoded.
+    recipient: Optional[str] = Field(
+        default=None,
+        description="Destination address, if not the sender's own wallet.",
+        example="0x0000000000000000000000000000000000000000",
+    )
     slippage: Optional[str] = Field(default="0.5%")
 
 
@@ -235,6 +244,7 @@ def start_bridge_flow(req: StartBridgeRequest):
         "amount": req.amount or 0.0,
         "asset": req.asset or "",
         "user_address": req.userAddress,
+        "recipient": (req.recipient or "").strip() or None,
         "slippage": req.slippage,
         "traces": {},
         "retry_count": 0,
