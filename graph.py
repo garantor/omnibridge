@@ -1167,8 +1167,11 @@ def _persist_route_as_skill(state: GraphState, receipt: Any) -> str:
         param_types=list(params.get("param_types") or []),
         param_values=stored_values,
         spend=params.get("spend"),
-        # Earned, not enumerated: the strings that actually resolved to this route.
-        aliases=sorted({src_name.lower(), dst_name.lower(), src_chain_info.name.lower()}),
+        # Earned, not enumerated: the strings that actually resolved to this route —
+        # and kept per end, because a route has a direction. Pooling them made every
+        # skill match its own reverse.
+        source_aliases=sorted({src_name.lower(), src_chain_info.name.lower()}),
+        dest_aliases=sorted({dst_name.lower()}),
         verified=True,
         last_verified=receipt.timestamp[:10],
         sources=list(params.get("sources") or []),

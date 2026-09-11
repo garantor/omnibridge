@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from langgraph.types import Command
 from graph import graph, skill_mgr
 from omnibridge.agent.contract import format_chain_ref
-from omnibridge.steplog import LOG_BUS, format_duration, run_context
+from omnibridge.steplog import LOG_BUS, StepLogger, format_duration, run_context
 
 server_app = FastAPI(
     title="LangGraph Web3 Bridging Gateway",
@@ -421,7 +421,60 @@ def advance_plan_step(req: AdvanceStepRequest):
     simulator = Simulator(candidates, expected_chain_id=src.chain_id)
 
     with run_context(req.runId):
+        log = StepLogger("advance")
+
+        # The step just signed has been *submitted*, not mined. Simulating the next one
+        # now measures a chain where this step has not happened yet — so an approval
+        # seconds from confirming reads as no allowance, and the bridge call it unlocks
+        # is reported as reverting and never becomes signable. Wait for it to land.
+        log.step(f"waiting for step {req.step_index + 1} ({req.tx_hash}) to be mined")
+        confirmation = simulator.wait_for_receipt(req.tx_hash, timeout_seconds=30.0)
+
+        if not confirmation["mined"]:
+            # Not an error: the transaction is in flight and the browser retries. The
+            # plan is saved with the hash recorded so nothing is signed twice, but the
+            # next step is deliberately left unsimulated rather than measured early.
+            log.warn(
+                f"step {req.step_index + 1} is not mined yet "
+                f"({confirmation['error'] or 'still pending'}) — not simulating the next "
+                "step against a chain it has not landed on"
+            )
+            graph.update_state(config, {"plan": plan.model_dump()})
+            return {
+                "status": "AWAITING_CONFIRMATION",
+                "thread_id": req.thread_id,
+                "plan": plan.model_dump(),
+                "next_step": None,
+                "pending_confirmation": True,
+                "pending_tx_hash": req.tx_hash,
+                "detail": confirmation["error"],
+                "all_signed": all(s.tx_hash for s in plan.steps),
+            }
+
+        if not confirmation["succeeded"]:
+            log.fail(
+                f"step {req.step_index + 1} was mined in block "
+                f"{confirmation['block_number']} but reverted"
+            )
+            graph.update_state(config, {"plan": plan.model_dump()})
+            return {
+                "status": "STEP_REVERTED",
+                "thread_id": req.thread_id,
+                "plan": plan.model_dump(),
+                "next_step": None,
+                "pending_confirmation": False,
+                "detail": (
+                    f"Step {req.step_index + 1} was mined in block "
+                    f"{confirmation['block_number']} but reverted on chain. The steps "
+                    "after it were not simulated, because the state they need does not "
+                    "exist."
+                ),
+                "all_signed": all(s.tx_hash for s in plan.steps),
+            }
+
+        log.ok(f"step {req.step_index + 1} confirmed in block {confirmation['block_number']}")
         plan, result, step = simulate_next(plan, simulator, values["user_address"])
+
     graph.update_state(config, {"plan": plan.model_dump()})
 
     return {
@@ -429,6 +482,8 @@ def advance_plan_step(req: AdvanceStepRequest):
         "thread_id": req.thread_id,
         "plan": plan.model_dump(),
         "next_step": step.model_dump() if step else None,
+        "pending_confirmation": False,
+        "confirmed_in_block": confirmation["block_number"],
         "all_signed": all(s.tx_hash for s in plan.steps),
     }
 

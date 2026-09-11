@@ -79,6 +79,44 @@ class Simulator:
                 continue
         return None, None
 
+    def wait_for_receipt(self, tx_hash: str, timeout_seconds: float = 30.0) -> Dict[str, Any]:
+        """
+        Block until a submitted transaction is mined, or say that it is not yet.
+
+        A step in a plan is signed one at a time, and `eth_sendTransaction` returns when
+        a transaction is *submitted*, not when it lands. Simulating the next step at that
+        moment measures a chain where the previous step has not happened — so an approval
+        that is seconds from confirming reads as no allowance, and the bridge call it
+        unlocks is reported as reverting.
+
+        Returns {"mined", "succeeded", "status", "block_number", "error"}. Never raises:
+        a timeout is an answer ("not yet"), not a failure, and the caller retries.
+        """
+        w3, _url = self._connect_verified()
+        if w3 is None:
+            return {"mined": False, "succeeded": False, "status": None,
+                    "block_number": None,
+                    "error": "No RPC endpoint of the expected chain was reachable."}
+
+        try:
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout_seconds)
+        except Exception as exc:
+            # web3 raises TimeExhausted for "not yet", which is the ordinary case here
+            # and must not be reported as though the transaction had failed.
+            return {"mined": False, "succeeded": False, "status": None,
+                    "block_number": None, "error": f"{type(exc).__name__}: {exc}"}
+
+        status = receipt.get("status") if isinstance(receipt, dict) else getattr(receipt, "status", None)
+        block = receipt.get("blockNumber") if isinstance(receipt, dict) else getattr(receipt, "blockNumber", None)
+        return {
+            "mined": True,
+            # status 0 is a mined transaction that reverted. Mined is not succeeded.
+            "succeeded": int(status) == 1 if status is not None else False,
+            "status": int(status) if status is not None else None,
+            "block_number": int(block) if block is not None else None,
+            "error": None,
+        }
+
     def simulate_call(
         self,
         from_address: str,

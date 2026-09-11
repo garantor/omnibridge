@@ -97,7 +97,17 @@ class SkillMetadata(BaseModel):
     spend: Optional[Dict[str, str]] = None
 
     # The strings that have actually resolved to this route, earned at save time rather
-    # than enumerated in advance.
+    # than enumerated in advance. Kept per role, because a route has a direction.
+    #
+    # These used to be one flat list consulted for both ends, which made every skill
+    # match its own reverse: an Arbitrum -> Base route carried the aliases
+    # {arbitrum, arbitrum one, base}, and a Base -> Arbitrum request found both names in
+    # that one pool and replayed it. The router in a replayed reverse route is on the
+    # wrong chain, and only a later chain-id check happened to catch it.
+    source_aliases: List[str] = Field(default_factory=list)
+    dest_aliases: List[str] = Field(default_factory=list)
+    #: Retained for skills written before the split, and for display. Never consulted
+    #: for matching: a shared pool cannot say which end a name belonged to.
     aliases: List[str] = Field(default_factory=list)
 
     # Provenance. A skill with no recent successful verification is a hypothesis, and
@@ -121,9 +131,11 @@ class SkillMetadata(BaseModel):
         if self.token.upper().strip() != token.upper().strip():
             return False
 
-        alias_set = {_norm(a) for a in self.aliases if a}
-        src_names = {_norm(self.source_chain)} | alias_set
-        dst_names = {_norm(self.dest_chain)} | alias_set
+        # Each end is matched against its own names only. A skill written before the
+        # split has no per-role aliases, so it matches on the recorded chain names
+        # alone — narrower than before, and the narrow direction is the safe one.
+        src_names = {_norm(self.source_chain)} | {_norm(a) for a in self.source_aliases if a}
+        dst_names = {_norm(self.dest_chain)} | {_norm(a) for a in self.dest_aliases if a}
         return _norm(source_chain) in src_names and _norm(dest_chain) in dst_names
 
 
@@ -137,6 +149,13 @@ class SkillManager:
     """Manages discovery, loading, verification, and persistence of SKILL.md modules."""
 
     def __init__(self, repository_path: Optional[str] = None):
+        # An explicit repository means *only* that repository. Without this, a manager
+        # pointed at a temporary directory still searched the working tree's ./skills
+        # and the packaged repository, so a real run that saved a route made unrelated
+        # tests fail — and, worse, a caller that asked for an isolated store silently
+        # got the machine's live one as well.
+        self.isolated = repository_path is not None
+
         if repository_path:
             self.repo_dir = Path(repository_path)
         else:
@@ -166,7 +185,7 @@ class SkillManager:
     def list_skills(self) -> List[Skill]:
         """Lists all registered skills in the repository and local skills directory."""
         skills = []
-        search_dirs = [
+        search_dirs = [self.repo_dir] if self.isolated else [
             self.repo_dir,
             Path.cwd() / "skills",
             Path(__file__).resolve().parent / "repository",

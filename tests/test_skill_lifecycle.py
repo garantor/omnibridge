@@ -378,3 +378,55 @@ def test_a_reference_is_rendered_for_a_human():
     assert format_chain_ref({"scheme": "cctp_domain", "value": "6"}) == "cctp_domain 6"
     assert format_chain_ref({"value": "6"}) == "6"
     assert format_chain_ref(None) == ""
+
+
+# ------------------------------------------------------- a route has a direction
+
+
+def _route(**over):
+    from omnibridge.skills.manager import SkillMetadata
+
+    base = dict(
+        name="arbitrum_to_base_usdc", description="d",
+        source_chain="Arbitrum One", source_chain_id=42161, dest_chain="base",
+        token="USDC", bridge_protocol="Circle CCTP",
+        router_address="0x19330d10D9Cc8751218eaf51E8885D058642E08A",
+        source_aliases=["arbitrum", "arbitrum one"], dest_aliases=["base"],
+    )
+    base.update(over)
+    return SkillMetadata(**base)
+
+
+def test_a_skill_matches_the_direction_it_was_verified_in():
+    assert _route().matches("arbitrum", "base", "USDC", "mainnet")
+
+
+def test_a_skill_never_matches_its_own_reverse():
+    """
+    The regression. Aliases were one flat pool consulted for both ends, so an
+    Arbitrum -> Base route carried {arbitrum, arbitrum one, base} and a Base -> Arbitrum
+    request found both names in it. The router of a reversed route is on the wrong
+    chain; only a later chain-id check happened to catch it.
+    """
+    assert not _route().matches("base", "arbitrum", "USDC", "mainnet")
+
+
+def test_a_legacy_pooled_alias_list_is_not_consulted_for_matching():
+    """A shared pool cannot say which end a name belonged to, so it is not trusted."""
+    legacy = _route(source_aliases=[], dest_aliases=[],
+                    aliases=["arbitrum", "arbitrum one", "base"])
+    assert not legacy.matches("base", "arbitrum", "USDC", "mainnet")
+    # The recorded chain names still work, so a legacy skill keeps serving its own route.
+    assert legacy.matches("arbitrum one", "base", "USDC", "mainnet")
+
+
+def test_an_explicit_repository_is_not_mixed_with_the_working_tree(tmp_path):
+    """
+    A manager pointed at a directory searches that directory. It used to also search
+    ./skills, so a real run that saved a route changed what unrelated callers saw.
+    """
+    from omnibridge.skills.manager import SkillManager
+
+    mgr = SkillManager(repository_path=str(tmp_path))
+    assert mgr.isolated is True
+    assert mgr.list_skills() == []

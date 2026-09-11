@@ -1113,10 +1113,16 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
 
       if (step.status !== "VERIFIED") {
         signBtn.disabled = false;
+        // Reset the label too. Leaving it on "Awaiting signature…" while no wallet
+        // prompt exists is how this state read as a hang rather than as a refusal.
+        signBtn.innerHTML = `<span>Sign in Wallet & Broadcast</span><span>🚀</span>`;
+        setStepActive(5);
         outputSection.insertAdjacentHTML("afterbegin",
           `<div class="banner banner-rose"><strong>Not signable:</strong> step ${step.index + 1}
            (${esc(step.title)}) is ${esc(step.status)}${step.revert_reason ? " — " + esc(step.revert_reason) : ""}.
-           Nothing further was sent.</div>`);
+           Nothing further was sent.${step.status === "PENDING_PREREQUISITE"
+             ? " It depends on an earlier step that has not confirmed yet."
+             : ""}</div>`);
         return;
       }
 
@@ -1148,16 +1154,40 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
       // Not the last step: tell the server, and let it verify the next one against
       // live state before we ask for another signature.
       if (i < steps.length - 1) {
-        signBtn.innerHTML = `<span>Step ${step.index + 1} sent — verifying the next against the chain…</span>`;
+        signBtn.innerHTML = `<span>Step ${step.index + 1} sent — waiting for it to confirm…</span>`;
         try {
-          const adv = await fetch("/api/bridge/advance", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ thread_id: currentThreadId, step_index: step.index,
-                                   tx_hash: hash, runId: currentRunId }),
-          });
-          if (!adv.ok) throw new Error((await adv.json().catch(() => ({}))).detail || `server ${adv.status}`);
-          const advData = await adv.json();
+          // The server waits for this step to be mined before simulating the next one,
+          // and answers AWAITING_CONFIRMATION if it has not landed within its window.
+          // That is an ordinary outcome on a slow block, not a failure, so it is
+          // retried here rather than reported as a dead end — which is what used to
+          // happen: the next step was simulated against a chain where the approval had
+          // not landed, came back un-VERIFIED, and the run could never continue.
+          let advData = null;
+          for (let attempt = 1; attempt <= 6; attempt++) {
+            const adv = await fetch("/api/bridge/advance", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ thread_id: currentThreadId, step_index: step.index,
+                                     tx_hash: hash, runId: currentRunId }),
+            });
+            if (!adv.ok) throw new Error((await adv.json().catch(() => ({}))).detail || `server ${adv.status}`);
+            advData = await adv.json();
+
+            if (advData.status === "STEP_REVERTED") {
+              throw new Error(advData.detail || "the signed step reverted on chain");
+            }
+            if (!advData.pending_confirmation) break;
+
+            signBtn.innerHTML = `<span>Step ${step.index + 1} sent — still confirming (${attempt}/6)…</span>`;
+          }
+
+          if (advData && advData.pending_confirmation) {
+            throw new Error(
+              `Step ${step.index + 1} has not confirmed yet. It is still in flight — ` +
+              "reload and start again once it has landed; nothing further was signed."
+            );
+          }
+
           currentPlan = advData.plan;
           steps.splice(0, steps.length, ...advData.plan.steps);
         } catch (err) {
