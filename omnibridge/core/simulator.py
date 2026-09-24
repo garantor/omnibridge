@@ -226,3 +226,28 @@ class Simulator:
                 simulated_on_chain_id=self.expected_chain_id,
                 simulated_via_rpc=rpc_url,
             )
+
+    def simulate_sequence_on_fork(self, sender: str, steps: List[Any]) -> Tuple[Optional[Any], Optional[str]]:
+        """
+        Run steps in order on an Anvil fork of this chain, as `sender`.
+
+        Returns (ForkRun, None), or (None, reason) when no fork could be made — Anvil
+        missing, no identity-checked node to fork from, or the fork failing to start.
+        The caller falls back to plain eth_call and says which one it used. The fork is
+        made from the same identity-checked endpoint eth_call would use, and checks the
+        chain id again itself.
+        """
+        from omnibridge.core.fork import ForkUnavailable, anvil_available, simulate_sequence
+
+        if not anvil_available():
+            return None, "anvil is not installed"
+        if not is_evm_address(sender):
+            return None, f"sender {sender!r} is not a valid EVM address"
+        w3, url = self._connect_verified()
+        if w3 is None or not url or self.expected_chain_id is None:
+            return None, "no identity-checked RPC endpoint to fork from"
+        try:
+            return simulate_sequence(url, int(self.expected_chain_id), sender, steps), None
+        except ForkUnavailable as exc:
+            return None, str(exc)
+

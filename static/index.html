@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css?v=5.0">
+  <link rel="stylesheet" href="/static/style.css?v=5.1">
 </head>
 <body>
   <div class="app-container">
@@ -169,6 +169,20 @@
         <!-- Injected dynamically via app.js -->
       </section>
 
+      <!-- Protocol Cards -->
+      <section class="cards-section card">
+        <div class="section-header-flex">
+          <div>
+            <h3>Protocol Cards</h3>
+            <p class="subtitle">What earlier runs established about each protocol, shown to the agent as hypotheses. A row is <strong>unverified</strong> when its contract passed the bytecode and selector check, <strong>verified</strong> once a broadcast you approved called it, and <strong>failed</strong> if a route using it reverted first. Only an approved broadcast verifies a row.</p>
+          </div>
+          <button id="refresh-cards-btn" class="btn btn-secondary">Refresh Cards</button>
+        </div>
+        <div id="cards-grid" class="cards-grid">
+          <!-- Injected dynamically -->
+        </div>
+      </section>
+
       <!-- Persistent Skills Library -->
       <section class="skills-section card">
         <div class="section-header-flex">
@@ -185,6 +199,6 @@
     </main>
   </div>
 
-  <script type="module" src="/static/app.js?v=6.0"></script>
+  <script type="module" src="/static/app.js?v=6.1"></script>
 </body>
 </html>

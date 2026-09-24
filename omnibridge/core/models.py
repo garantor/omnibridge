@@ -139,6 +139,13 @@ class TransactionStep(BaseModel):
 
     tx_hash: Optional[str] = None
 
+    # What a forked simulation of the whole plan said about this step, run with every
+    # earlier step applied first. Evidence only: it never makes a step signable, because
+    # the fork is a snapshot and the live re-check before signing is what counts.
+    fork_verified: Optional[bool] = None
+    fork_gas_used: Optional[int] = None
+    fork_revert_reason: Optional[str] = None
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def signable(self) -> bool:

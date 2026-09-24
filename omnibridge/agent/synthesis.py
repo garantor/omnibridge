@@ -122,6 +122,7 @@ def synthesize(
     decimals: int = 6,
     retrieved: Optional[List[str]] = None,
     sender: Optional[str] = None,
+    card_authority: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, RouteQuote, Dict[str, Any]]:
     """
     Check a proposal and encode it, or refuse.
@@ -149,6 +150,18 @@ def synthesize(
             # corroboration is a hostname check on URLs the model typed.
             retrieved=retrieved,
         )
+        if card_authority and report.failures and report.is_contract and report.selector_present:
+            # A verified card row is earned knowledge: a human approved a broadcast that
+            # called this exact contract. It stands in for the documentation source, and
+            # for nothing else — bytecode and selector were still checked just now, and
+            # the simulator and the human gate still follow. Off unless the caller opts in.
+            waived = [f for f in report.failures if "documentation allowlist" in f]
+            if waived:
+                report.failures = [f for f in report.failures if f not in waived]
+                report.notes.append(
+                    "Documentation source satisfied by verified card row "
+                    f"{card_authority.get('protocol_id')}:{card_authority.get('source_chain_id')}."
+                )
         if not report.ok:
             raise ProposalRejected(
                 "Provenance checks failed: " + "; ".join(report.failures), report

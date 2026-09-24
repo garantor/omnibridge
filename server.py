@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from langgraph.types import Command
-from graph import graph, skill_mgr
+from graph import card_mgr, graph, skill_mgr
 from omnibridge.agent.contract import format_chain_ref
 from omnibridge.steplog import LOG_BUS, StepLogger, format_duration, run_context
 
@@ -578,6 +578,49 @@ def list_skills():
         }
         for s in skill_mgr.list_skills()
     ]
+
+
+@server_app.get("/api/cards")
+def list_cards():
+    """
+    Protocol cards, as the agent's card manager reads them.
+
+    Served from parsed values, the same ones the agent is shown, so the page can never
+    display a fact the parser refused. A card that does not parse is absent here for
+    the same reason it is absent from discovery.
+    """
+    out = []
+    for doc in card_mgr.list_cards():
+        card = doc.card
+        out.append({
+            "protocol_id": card.protocol_id,
+            "protocol_name": card.protocol_name,
+            "card_version": card.card_version,
+            "last_updated": card.last_updated,
+            "docs": list(card.docs),
+            "supported_tokens": list(card.supported_tokens),
+            "interfaces": [{"label": i.label, "signature": i.signature} for i in card.interfaces],
+            "dest_id_label": card.dest_id_label,
+            "address_labels": list(card.address_labels),
+            "rows": [
+                {
+                    "network": r.network,
+                    "chain_id": r.chain_id,
+                    "dest_id": r.dest_id,
+                    "dest_confirmed": r.dest_confirmed,
+                    "addresses": r.addresses,
+                    "status": r.status.value,
+                    "verified_date": r.verified_date,
+                    "evidence": r.evidence,
+                }
+                for r in card.rows
+            ],
+            "failure_modes": [
+                {"revert": f.revert, "fix": f.fix, "seen": f.seen} for f in card.failure_modes
+            ],
+            "path": doc.file_path,
+        })
+    return out
 
 
 if __name__ == "__main__":

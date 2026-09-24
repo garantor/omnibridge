@@ -79,78 +79,51 @@ def handle_rpc_bench(args):
 
 
 def handle_cards_list(args):
-    """Lists protocol cards and how far each entry has been established."""
-    from omnibridge.cards.manager import CardManager
+    """Lists protocol cards and the status of their chain rows."""
+    from omnibridge.cards.manager import CardManager, status_counts
 
     table = Table(title="[bold green]Omnibridge Protocol Cards[/bold green]")
     table.add_column("Card", style="cyan")
-    table.add_column("Kind", style="white")
     table.add_column("Version", style="white")
+    table.add_column("Tokens", style="yellow")
     table.add_column("Verified", style="green")
-    table.add_column("Checked", style="yellow")
-    table.add_column("Lead", style="white")
-    table.add_column("Demoted", style="red")
+    table.add_column("Unverified", style="white")
+    table.add_column("Failed", style="red")
+    table.add_column("Failure modes", style="white")
     table.add_column("Path", style="dim")
-
     for doc in CardManager().list_cards():
-        counts = {"verified": 0, "checked": 0, "lead": 0, "demoted": 0}
-        for status in doc.card.statuses().values():
-            counts[status] += 1
+        counts = status_counts(doc.card)
         table.add_row(
-            doc.card.id,
-            doc.card.kind + ("" if doc.card.executable else " (not executable)"),
-            str(doc.card.card_version),
-            *(str(counts[k]) for k in ("verified", "checked", "lead", "demoted")),
-            doc.file_path or "",
+            doc.card.protocol_id, str(doc.card.card_version), ", ".join(doc.card.supported_tokens),
+            str(counts["verified"]), str(counts["unverified"]), str(counts["failed"]),
+            str(len(doc.card.failure_modes)), doc.file_path or "",
         )
     console.print(table)
 
 
 def handle_cards_check(args):
     """
-    Run the on-chain checks over a card and show what they would change.
+    Re-run the automated code check (bytecode, selectors) over every row of a card.
 
-    Read-only unless --write is given, and even then it only raises passing leads to
-    `checked` and records token decimals read from the chain. It never verifies or
-    demotes anything: only a run outcome does that.
+    Report-only. Passing it is what `unverified` already means, and only an approved
+    broadcast verifies a row, so there is nothing for this command to promote.
     """
     from omnibridge.cards.manager import CardManager
-    from omnibridge.cards.validation import apply_checks, check_card
-    from omnibridge.memory.store import utc_today
+    from omnibridge.cards.validation import check_card
 
-    mgr = CardManager()
-    doc = mgr.load(args.protocol_id)
+    doc = CardManager().load(args.protocol_id)
     if doc is None:
         console.print(f"[red]No readable card '{args.protocol_id}'.[/red]")
         sys.exit(1)
-
-    results = check_card(doc.card)
-    table = Table(title=f"[bold cyan]Checks for {doc.card.id} (v{doc.card.card_version})[/bold cyan]")
-    table.add_column("Entry", style="cyan")
+    table = Table(title=f"[bold cyan]Code check for {doc.card.protocol_id} (v{doc.card.card_version})[/bold cyan]")
+    table.add_column("Row", style="cyan")
     table.add_column("Status", style="white")
-    table.add_column("Result", style="white")
+    table.add_column("Check", style="white")
     table.add_column("Reasons", style="dim")
-    for r in results:
-        change = f"{r.current.value} -> {r.proposed.value}" if r.changes_status else r.current.value
-        verdict = "[green]pass[/green]" if r.passed else "[red]fail[/red]"
-        table.add_row(f"{r.kind}:{r.entry_id}", change, verdict, "; ".join(r.reasons))
+    for row, result in zip(doc.card.rows, check_card(doc.card)):
+        verdict = "[green]pass[/green]" if result.passed else "[red]fail[/red]"
+        table.add_row(result.subject, row.status.value, verdict, "; ".join(result.reasons))
     console.print(table)
-    console.print(
-        "[dim]Destinations and parameters have no on-chain check and stay leads until a "
-        "broadcast uses them.[/dim]"
-    )
-
-    promotions = [r for r in results if r.changes_status]
-    if not args.write:
-        if promotions:
-            console.print(f"{len(promotions)} lead(s) would become checked. Re-run with --write to record it.")
-        return
-    if not promotions and not any(r.kind == "tokens" and r.passed for r in results):
-        console.print("Nothing to write.")
-        return
-    updated = apply_checks(doc.card, results, utc_today())
-    path = mgr.save_card(updated, cause=f"cards check: {len(promotions)} lead(s) passed on-chain checks")
-    console.print(f"[green]Wrote {path}[/green]")
 
 
 def main(argv=None):
@@ -182,12 +155,8 @@ def main(argv=None):
     cards_parser = subparsers.add_parser("cards", help="Inspect and check protocol cards")
     cards_sub = cards_parser.add_subparsers(dest="cards_command")
     cards_sub.add_parser("list", help="List protocol cards")
-    check_parser = cards_sub.add_parser("check", help="Run on-chain checks over a card's entries")
+    check_parser = cards_sub.add_parser("check", help="Re-run the bytecode and selector check over a card")
     check_parser.add_argument("protocol_id", help="Card id, e.g. cctp")
-    check_parser.add_argument(
-        "--write", action="store_true",
-        help="Record passing leads as checked (never verifies or demotes)",
-    )
 
     args = parser.parse_args(argv)
 

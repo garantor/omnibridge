@@ -15,9 +15,10 @@ from omnibridge.discovery.rpc_manager import RPCManager
 from omnibridge.discovery.route_finder import RouteFinder
 from omnibridge.core.executor import CalldataExecutor
 from omnibridge.core.simulator import Simulator, is_evm_address
-from omnibridge.core.models import SimulationStatus
+from omnibridge.core.models import SimulationResult, SimulationStatus
 from omnibridge.core.signer import Signer
 from omnibridge.agent.contract import format_chain_ref
+from omnibridge.cards.manager import CardManager
 
 
 class GraphState(TypedDict):
@@ -62,6 +63,12 @@ class GraphState(TypedDict):
     # UNCHECKED as a distinct outcome, so "could not read the balance" is never
     # rendered as "the balance is fine".
     funding: Optional[Dict[str, Any]]
+    # The protocol card row this route's contract came from, matched in code on the
+    # router address. Write-back uses it; the model's say-so is never consulted.
+    card_match: Optional[Dict[str, Any]]
+    # The simulation failed on an Anvil fork *after* the plan's approval was applied
+    # there, so an allowance revert means a wrong spender, not a missing approval.
+    fork_failure: Optional[bool]
 
 
 # Bounded by plan 3.4. Three attempts, then the run ends.
@@ -70,6 +77,23 @@ MAX_DISCOVERY_RETRIES = int(os.environ.get("OMNIBRIDGE_MAX_RETRIES", "3"))
 rpc_mgr = RPCManager()
 skill_mgr = SkillManager(repository_path=str(LOCAL_SKILLS_DIR))
 finder = RouteFinder(skill_manager=skill_mgr, rpc_manager=rpc_mgr)
+card_mgr = CardManager()
+
+
+def _card_authority_enabled() -> bool:
+    """A verified card row may stand in for the documentation source. Off by default."""
+    return os.environ.get("OMNIBRIDGE_CARD_AUTHORITY", "").strip().lower() in ("1", "true", "yes")
+
+
+def _agent_tools_disabled() -> bool:
+    return os.environ.get("OMNIBRIDGE_DISABLE_AGENT_TOOLS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _dest_chain_id(name: str) -> Optional[int]:
+    try:
+        return rpc_mgr.discover_chain_metadata(name).chain_id
+    except Exception:
+        return None
 
 
 # --- NODE 1: Intent & Orchestrator Parser ---
@@ -498,6 +522,42 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     budget = RequestBudget.restore(state.get("budget"))
     agent_trace: Dict[str, Any] = {}
 
+    # Stage 2: relevant protocol cards go into the question as hypotheses, and the agent
+    # gets its toolkit so it can check them — and its own research — before proposing.
+    from omnibridge.cards.context import render_for_agent, select_cards
+
+    dest_chain_id = _dest_chain_id(state["target_chain"])
+    cards = select_cards(card_mgr, intent.token, src_info.chain_id, intent.source_chain,
+                         state["target_chain"], dest_chain_id)
+    cards_context = render_for_agent(cards)
+    log.value("protocol cards offered", ", ".join(c.protocol_id for c in cards) or "none")
+
+    toolkit = None
+    if not _agent_tools_disabled():
+        from omnibridge.agent.tools import AgentToolkit, ToolContext
+        from omnibridge.cards.validation import default_web3_for
+
+        rpc_candidates = [fastest_rpc] + [u for u in src_info.rpc_urls if u != fastest_rpc]
+        toolkit = AgentToolkit(ToolContext(
+            sender=state["user_address"],
+            source_chain_id=src_info.chain_id,
+            simulator=Simulator(rpc_candidates, expected_chain_id=src_info.chain_id),
+            cards=card_mgr,
+            web3_for=default_web3_for(),
+            domains=agent.domains,
+        ))
+
+    import inspect
+
+    # Providers written before cards take neither argument; they are passed only to a
+    # provider that declares them, so an older provider keeps working unchanged.
+    accepted = inspect.signature(agent.discover).parameters
+    extra: Dict[str, Any] = {}
+    if "cards_context" in accepted:
+        extra["cards_context"] = cards_context
+    if "tools" in accepted:
+        extra["tools"] = toolkit
+
     try:
         proposal = agent.discover(
             intent,
@@ -506,6 +566,7 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
             budget,
             failure_context=state.get("failure_context"),
             trace=agent_trace,
+            **extra,
         )
     except NoRouteFound as exc:
         # A correct answer, not a failure: terminates, and is never retried.
@@ -566,15 +627,67 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
         # is accepted on the model's word until the simulator gets a look at it.
         log.warn("skipping on-chain provenance — router bytecode will NOT be checked here")
 
+    from omnibridge.agent.synthesis import ProposalRejected
+    from omnibridge.cards.writeback import match_route
+
+    match = match_route(card_mgr, src_info.chain_id, proposal.router_address,
+                        dest_chain_id, proposal.dest_chain_ref)
+    card_match = match.as_dict() if match else None
+    if match:
+        log.value("card row matched", f"{match.protocol_id}:{match.source_chain_id} ({match.source_status})")
+
     log.step("checking the proposal (Rule A boundary — the model stops choosing here)")
-    with log.timed("shape, provenance and encoding"):
-        calldata, quote, evidence = synthesize(
-            proposal, intent, src_info, w3,
-            allowed_domains=agent.domains,
-            retrieved=getattr(proposal, "retrieved", None) or None,
-            # Passed so synthesis can tell a third-party recipient from the default.
-            sender=state["user_address"],
-        )
+    try:
+        if match and match.dest_agrees is False and match.card_dest_confirmed:
+            # The plan's own example failure: a destination named by its EIP-155 id where
+            # the protocol wants its own identifier. A broadcast confirmed the card's
+            # value, so a different one is refused here rather than burned on chain.
+            raise ProposalRejected(
+                f"The proposal identifies the destination as {match.dest_id}, but card "
+                f"{match.protocol_id} records {match.card_dest_id} for chain "
+                f"{match.dest_chain_id}, confirmed by a broadcast."
+            )
+        with log.timed("shape, provenance and encoding"):
+            calldata, quote, evidence = synthesize(
+                proposal, intent, src_info, w3,
+                allowed_domains=agent.domains,
+                retrieved=getattr(proposal, "retrieved", None) or None,
+                # Passed so synthesis can tell a third-party recipient from the default.
+                sender=state["user_address"],
+                card_authority=card_match if (
+                    match and match.source_status == "verified" and _card_authority_enabled()
+                ) else None,
+            )
+    except ProposalRejected as exc:
+        # Feedback, not a crash. It used to escape the graph as an exception, so a
+        # proposal the checks refused ended the run instead of informing the next try.
+        log.fail(f"proposal refused: {exc}")
+        traces = state.get("traces", {})
+        traces["step_2_discovery"] = {
+            "title": "Route & Contract Discovery (agent)",
+            "source_type": "AGENT_RUNTIME_DISCOVERY",
+            "outcome": "PROPOSAL_REJECTED",
+            "reason": str(exc),
+            "proposal": proposal.as_dict(),
+            "card_match": card_match,
+            "cards_offered": [c.protocol_id for c in cards],
+            "agent_tools": toolkit.summary() if toolkit else None,
+            "budget": budget.as_dict(),
+            "status": "FAILED",
+        }
+        return {
+            "status": "PROPOSAL_REJECTED",
+            "error": str(exc),
+            "failure_context": (
+                f"Your proposal ({proposal.protocol}, router {proposal.router_address}, "
+                f"{proposal.function_signature}) was refused before simulation: {exc}"
+            ),
+            "budget": budget.as_dict(),
+            "card_match": card_match,
+            "retry_count": state.get("retry_count", 0) + 1,
+            "traces": traces,
+        }
+    evidence["card_match"] = card_match
 
     prov = evidence.get("provenance") or {}
     if prov.get("skipped"):
@@ -622,6 +735,8 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
         "model": agent.model,
         "agent_turns": agent_trace.get("turns", []),
         "evidence": evidence,
+        "cards_offered": [c.protocol_id for c in cards],
+        "agent_tools": toolkit.summary() if toolkit else None,
         "budget": budget.as_dict(),
         "active_rpc": fastest_rpc,
         "status": "COMPLETED",
@@ -640,6 +755,7 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
         "status": "ROUTE_DISCOVERED",
         "budget": budget.as_dict(),
         "agent_evidence": evidence,
+        "card_match": card_match,
         "traces": traces,
     }
 
@@ -652,6 +768,12 @@ def route_after_discovery(state: GraphState) -> str:
     second will fail identically on every retry against the same credentials.
     """
     if state.get("status") in ("NO_ROUTE_FOUND", "CONFIG_ERROR", "MISSING_PREREQUISITE"):
+        return "error_node"
+    if state.get("status") == "PROPOSAL_REJECTED":
+        # Straight back to discovery with the refusal as context, within the same
+        # retry bound as a revert. The budget's attempt counter bounds it as well.
+        if state.get("retry_count", 0) < MAX_DISCOVERY_RETRIES:
+            return "discovery_node"
         return "error_node"
     return "code_builder_node"
 
@@ -860,19 +982,38 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
 
     plan = ExecutionPlan(**state["plan"]) if state.get("plan") else None
     plan_out = None
+    fork_run = None
+    fork_failed = False
 
     if plan is not None and any(st.tx_hash is None for st in plan.steps):
         pending = [st for st in plan.steps if st.tx_hash is None][0]
         log.value("step", f"{pending.index + 1} of {len(plan.steps)} — {pending.kind}")
         with log.timed(f"simulate {pending.kind}"):
             plan, sim_res, _ = simulate_next(plan, sim, state["user_address"])
+        fork_run, fork_note = _fork_check_plan(plan, sim, state["user_address"], sim_res, log)
         plan_out = plan.model_dump()
         for later in plan.steps:
             if later.status.value == "PENDING_PREREQUISITE":
+                forked = (" — passed on a fork with the earlier steps applied"
+                          if later.fork_verified else "")
                 log.value(
                     f"  step {later.index + 1} ({later.kind})",
-                    "not checked yet — re-simulated after the step before it lands",
+                    "re-simulated live after the step before it lands" + forked,
                 )
+        if fork_run is not None and not fork_run.success and fork_note is None:
+            failure = fork_run.first_failure
+            sim_res = SimulationResult(
+                status=SimulationStatus.REVERTED,
+                revert_reason=(
+                    f"On a fork of chain {src_info.chain_id}, with the earlier step(s) applied, "
+                    f"the {failure.label} step reverted: {failure.revert_reason}"
+                ),
+                calldata_preview=sim_res.calldata_preview,
+                output_amount_valid=False,
+                simulated_on_chain_id=src_info.chain_id,
+                simulated_via_rpc="anvil fork of " + (fork_run.fork_url or ""),
+            )
+            fork_failed = True
     else:
         with log.timed("simulate"):
             sim_res = sim.simulate_call(
@@ -912,7 +1053,9 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
     traces["step_4_simulation"] = {
         "title": "Dry-Run Simulation (eth_call)",
         "rpc_endpoint": rpc_url,
-        "method": "eth_call / static gas estimation",
+        "method": "eth_call / static gas estimation"
+        + (" + Anvil fork of the whole plan" if fork_run is not None else ""),
+        "fork": fork_run.as_dict() if fork_run is not None else None,
         "simulation_status": sim_res.status.value,
         "simulation_passed": sim_res.success,
         "verified_chain_id": sim_res.simulated_on_chain_id,
@@ -929,8 +1072,44 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
         "estimated_gas_usd": sim_res.estimated_gas_cost_usd or 0.0,
         "status": "SIMULATION_PASSED" if sim_res.success else "SIMULATION_FAILED",
         "error": sim_res.revert_reason if not sim_res.success else None,
+        "fork_failure": fork_failed,
         "traces": traces,
     }
+
+
+def _fork_check_plan(plan: Any, sim: Simulator, sender: str, first_result: Any, log: Any):
+    """
+    Run every unsigned step of the plan, in order, on an Anvil fork.
+
+    Only worth doing when there is more than one step and the first passed live: then
+    the fork is the one place the later steps can be checked before anything is signed.
+    Results are written onto the steps as evidence. Returns (ForkRun or None, note), where
+    a note means the fork itself could not answer — never read as a pass or a revert.
+    """
+    from omnibridge.core.fork import ForkStep
+
+    pending = [s for s in plan.steps if s.tx_hash is None]
+    if len(pending) < 2 or not first_result.success:
+        return None, "not needed"
+    steps = [ForkStep(to=s.to, data=s.data, value_wei=s.value_wei, label=s.kind) for s in pending]
+    with log.timed(f"fork-simulate all {len(steps)} steps"):
+        run, why_not = sim.simulate_sequence_on_fork(sender, steps)
+    if run is None:
+        log.warn(f"no fork ({why_not}); later steps are checked live after the earlier ones land")
+        return None, why_not
+    for step, result in zip(pending, run.steps):
+        step.fork_verified = result.success
+        step.fork_gas_used = result.gas_used
+        step.fork_revert_reason = result.revert_reason
+    failure = run.first_failure
+    if failure is not None and failure.infrastructure_error:
+        log.warn(f"the fork could not answer for the {failure.label} step: {failure.revert_reason}")
+        return run, "fork infrastructure error"
+    if run.success:
+        log.ok("every step passed on a fork, in order")
+    else:
+        log.fail(f"{failure.label} step reverted on the fork: {failure.revert_reason}")
+    return run, None
 
 
 def route_after_simulation(state: GraphState) -> str:
@@ -1091,6 +1270,17 @@ def broadcast_skill_node(state: GraphState) -> Dict[str, Any]:
             f"({skill_error}). The route will be rediscovered next time."
         )
 
+    # Stage 3 of the card lifecycle: an approved broadcast verifies the card row whose
+    # contract it called. Bookkeeping, so it can never change the outcome above.
+    card_path, card_error = None, None
+    if state.get("card_match"):
+        try:
+            from omnibridge.cards.writeback import record_success
+
+            card_path = record_success(card_mgr, state["card_match"], receipt.tx_hash)
+        except Exception as exc:
+            card_error = f"{type(exc).__name__}: {exc}"
+
     traces = state.get("traces", {})
     traces["step_6_broadcast"] = {
         "title": "On-Chain Broadcast & SKILL.md Registration",
@@ -1100,6 +1290,8 @@ def broadcast_skill_node(state: GraphState) -> Dict[str, Any]:
         # Named rather than implied by a null path, so "not saved" is distinguishable
         # from "saved somewhere this response did not carry".
         "skill_save_error": skill_error,
+        "card_path": card_path,
+        "card_save_error": card_error,
         "status": "COMPLETED" if skill_error is None else "COMPLETED_WITHOUT_SKILL",
     }
 
@@ -1226,7 +1418,10 @@ def error_node(state: GraphState) -> Dict[str, Any]:
     # A missing prerequisite is not a routing error, so it never goes round the retry
     # edge. Three attempts against the same allowance revert cost ~170s of model time
     # and produced three contradictory explanations of a failure the model could not see.
-    prerequisite = _missing_prerequisite(reason or "")
+    # After a fork applied the plan's approval, an allowance revert is not a missing
+    # approval — the approval was there. It means the route approved the wrong spender
+    # or pulls a different token, which is a routing error another attempt can fix.
+    prerequisite = None if state.get("fork_failure") else _missing_prerequisite(reason or "")
     retryable = (
         sim.get("status") in ("REVERTED", "UNAVAILABLE")
         and bool(reason)
@@ -1253,6 +1448,24 @@ def error_node(state: GraphState) -> Dict[str, Any]:
             except Exception as exc:  # never let bookkeeping mask the original failure
                 demoted = f"demotion failed: {exc}"
 
+    # Stage 4: a revert is written onto the card the route used, from what the node
+    # said, and an unverified row it relied on is marked failed. Bookkeeping: it must
+    # never mask the failure being reported.
+    card_match = state.get("card_match")
+    card_note, fix = None, None
+    if sim.get("status") == "REVERTED" and reason and card_match and prerequisite is None:
+        try:
+            from omnibridge.cards.writeback import known_fix, record_failure
+
+            record_failure(card_mgr, card_match, reason)
+            fix = known_fix(card_mgr, card_match.get("protocol_id"), reason)
+            card_note = (
+                f"This route used card {card_match.get('protocol_id')} row "
+                f"{card_match.get('source_chain_id')} (was {card_match.get('source_status')})."
+            )
+        except Exception as exc:
+            card_note = f"card write-back failed: {exc}"
+
     failure_context = None
     if retryable and state.get("retry_count", 0) < MAX_DISCOVERY_RETRIES:
         route = state.get("route") or {}
@@ -1261,6 +1474,10 @@ def error_node(state: GraphState) -> Dict[str, Any]:
             f"rejected at simulation: {reason}. Establish what was wrong before proposing "
             "again, and do not repeat the same router and arguments."
         )
+        if card_note:
+            failure_context += " " + card_note
+        if fix:
+            failure_context += f" The card records this fix for that revert (unverified advice): {fix}"
 
     traces = state.get("traces", {})
     # This node runs once per attempt, so the second pass must not erase what the first
@@ -1289,6 +1506,8 @@ def error_node(state: GraphState) -> Dict[str, Any]:
         "retry_count": state.get("retry_count", 0),
         "will_retry": failure_context is not None,
         "demoted_skill": demoted or previous.get("demoted_skill"),
+        "card_note": card_note,
+        "known_fix": fix,
         "attempts": [*previous.get("attempts", []), {
             "simulation_status": sim.get("status"),
             "error": reason,
@@ -1351,7 +1570,7 @@ builder.add_conditional_edges(
     "preflight_node", route_after_preflight, ["discovery_node", "error_node"]
 )
 builder.add_conditional_edges(
-    "discovery_node", route_after_discovery, ["code_builder_node", "error_node"]
+    "discovery_node", route_after_discovery, ["code_builder_node", "error_node", "discovery_node"]
 )
 builder.add_conditional_edges(
     "code_builder_node", route_after_code_builder, ["simulator_node", "error_node"]

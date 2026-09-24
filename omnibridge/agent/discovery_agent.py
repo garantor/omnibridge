@@ -129,8 +129,9 @@ class AnthropicDiscoveryAgent(DiscoveryProvider):
             self._client = anthropic.Anthropic(default_headers=headers)
         return self._client
 
-    def _tools(self) -> List[Dict[str, Any]]:
-        return [
+    def _tools(self, toolkit: Any = None) -> List[Dict[str, Any]]:
+        client = list(toolkit.schemas()) if toolkit is not None else []
+        return client + [
             {
                 "type": "web_search_20260209",
                 "name": "web_search",
@@ -147,13 +148,13 @@ class AnthropicDiscoveryAgent(DiscoveryProvider):
             NO_ROUTE_FOUND_TOOL,
         ]
 
-    def _request(self, messages: List[Dict[str, Any]]) -> Any:
+    def _request(self, messages: List[Dict[str, Any]], toolkit: Any = None) -> Any:
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "system": SYSTEM_PROMPT,
             "messages": messages,
-            "tools": self._tools(),
+            "tools": self._tools(toolkit),
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": self.effort},
         }
@@ -171,6 +172,8 @@ class AnthropicDiscoveryAgent(DiscoveryProvider):
         budget: RequestBudget,
         failure_context: Optional[str] = None,
         trace: Optional[Dict[str, Any]] = None,
+        cards_context: Optional[str] = None,
+        tools: Optional[Any] = None,
     ) -> RouteProposal:
         """
         Run the loop until the model reports a route or refuses.
@@ -179,13 +182,15 @@ class AnthropicDiscoveryAgent(DiscoveryProvider):
         of room, and RuntimeError when it stops without deciding either way.
         """
         budget.start_attempt()
-        question = self.build_question(intent, source_chain, dest_chain_name, failure_context)
+        question = self.build_question(
+            intent, source_chain, dest_chain_name, failure_context, cards_context
+        )
         messages: List[Dict[str, Any]] = [{"role": "user", "content": question}]
         turns: List[Dict[str, Any]] = []
 
         while True:
             budget.check()
-            response = self._request(messages)
+            response = self._request(messages, tools)
             budget.record_usage(getattr(response, "usage", None))
 
             turns.append(
@@ -201,6 +206,22 @@ class AnthropicDiscoveryAgent(DiscoveryProvider):
                     "Discovery declined by the model"
                     + (f" ({getattr(details, 'category', None)})" if details else "")
                 )
+
+            # Client tools first, so a card update sent alongside a terminal answer is
+            # still recorded. Their results go back to the model if the turn continues.
+            tool_results: List[Dict[str, Any]] = []
+            for block in response.content:
+                if getattr(block, "type", None) != "tool_use":
+                    continue
+                name = getattr(block, "name", "")
+                if tools is not None and tools.handles(name):
+                    result = tools.handle(name, getattr(block, "input", {}) or {})
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": getattr(block, "id", ""),
+                        "content": json.dumps(result, default=str),
+                        "is_error": not result.get("ok", False),
+                    })
 
             for block in response.content:
                 if getattr(block, "type", None) != "tool_use":
@@ -239,8 +260,12 @@ class AnthropicDiscoveryAgent(DiscoveryProvider):
                 continue
 
             if getattr(response, "stop_reason", None) == "tool_use":
+                if tool_results:
+                    messages.append({"role": "assistant", "content": response.content})
+                    messages.append({"role": "user", "content": tool_results})
+                    continue
                 # A client tool we do not serve. Nothing to execute, so stop rather than
-                # loop; the model has no other client-side tool it is allowed to use.
+                # loop on a request that can never be answered.
                 raise RuntimeError("Model requested an unsupported tool; refusing to continue.")
 
             if trace is not None:

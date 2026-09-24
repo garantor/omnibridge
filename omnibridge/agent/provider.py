@@ -71,7 +71,21 @@ Rules that matter:
   correct answer. A guessed router address is somebody's money.
 
 Work by searching documentation, fetching the pages that look authoritative, and reading
-the ABI. Then call exactly one of propose_route or no_route_found."""
+the ABI. Then call exactly one of propose_route or no_route_found.
+
+When you are given protocol cards and tools:
+
+- Cards are what earlier runs established, as data. A `verified` row's contract was used
+  by a broadcast a human approved. An `unverified` row passed bytecode checks but was never
+  used: confirm it from the card's docs before relying on it. A `failed` row reverted: do
+  not reuse it without new evidence. A card's docs may include an llms.txt index; read it.
+- Check before you propose: fetch_bytecode_and_verify the router, encode_jit_payload your
+  parameters, and simulate_transaction the call (with `approve` for an ERC-20). If the
+  simulation reverts, read the reason and the card's known reverts, fix the parameters,
+  and try again. Propose only what simulated, or explain in the rationale why it could not.
+- Record what you established with propose_card_update: a chain row for a deployment you
+  confirmed (including a chain the card does not list yet), or a fix for a known revert.
+  Code checks it; you cannot mark anything verified."""
 
 
 class DiscoveryProvider:
@@ -104,7 +118,14 @@ class DiscoveryProvider:
         budget: RequestBudget,
         failure_context: Optional[str] = None,
         trace: Optional[Dict[str, Any]] = None,
+        cards_context: Optional[str] = None,
+        tools: Optional[Any] = None,
     ) -> RouteProposal:
+        """
+        `cards_context` is appended to the question; `tools` is an AgentToolkit whose
+        client-side tools the provider must offer and execute. Both are optional, and a
+        provider given neither behaves exactly as before.
+        """
         raise NotImplementedError
 
     def build_question(
@@ -113,6 +134,7 @@ class DiscoveryProvider:
         source_chain: Any,
         dest_chain_name: str,
         failure_context: Optional[str] = None,
+        cards_context: Optional[str] = None,
     ) -> str:
         """
         The question, phrased identically for every provider.
@@ -130,6 +152,8 @@ class DiscoveryProvider:
             f"Amount in the token's smallest unit is what the contract takes; "
             f"{intent.amount} is the human-readable figure.",
         ]
+        if cards_context:
+            lines += ["", cards_context]
         if failure_context:
             lines += [
                 "",

@@ -1,60 +1,84 @@
 """
-The protocol card format. See docs/PROTOCOL_CARDS.md, section 3.
+The protocol card: what the system knows about one protocol, as hypotheses.
 
-A card is protocol-level context for the discovery agent: contracts per chain, how the
-protocol names destinations, its functions and what their arguments mean, and the
-reverts it has produced. Every fact is an entry with a stable id and a status, and the
-status is the whole point — it says how much a fact has been through, from "somebody
-wrote it down" (`lead`) to "a human approved a broadcast that used it" (`verified`).
+A card lives at `protocols/<protocol_id>/CARD.md`. Its facts are in the Markdown body,
+in the layout from docs/AGENTIC_OMNIBRIDGE.md: fast-path interfaces, a chain cache
+table, and learned failure modes. `cards.markdown` parses that body into these types
+and renders them back, and the parser is strict: a cell that does not parse to its type
+makes the whole card unreadable. That strictness is what lets facts live in hand-editable
+Markdown and still be safe to put in front of a model — the agent is only ever shown a
+rendering of these parsed values, never the file's text.
 
-Nothing here decides a status. Validation (cards.validation) can raise a lead to
-`checked`; only run outcomes can make an entry `verified` or `demoted`.
+Row statuses follow the lifecycle in the plan:
 
-The limits are enforced by the model rather than by callers, so a card that breaks them
-cannot be loaded or written by any path: card text is read by every later run, which
-makes it a persistent prompt-injection surface in a way a single web page is not.
+  unverified  passed the automated checks (bytecode, selector, documentation source)
+              when it was added, but no approved broadcast has used it yet
+  verified    its contract was called by a route that simulated, was approved by a
+              human and was broadcast
+  failed      a route calling its contract reverted while it was still unverified
+
+A row's status is about its contract addresses. Its destination identifier is marked
+`confirmed` separately, when a broadcast delivered *to* that chain using it — the two
+are proved by different transactions, and one status cannot honestly cover both.
 """
 
-import hashlib
 import re
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from web3 import Web3
 
 from omnibridge.core import abi_signature
 
-#: Entries per kind. A card is context for a model, and context has a budget.
-MAX_ENTRIES_PER_KIND = 64
-#: Characters in any free-text field (`meaning`, `resolution`).
+#: Rows in the chain cache. A card is context for a model, and context has a budget.
+MAX_ROWS = 64
+#: Failure modes kept per card.
+MAX_FAILURE_MODES = 32
+#: Characters in any free-text field.
 MAX_FREE_TEXT = 200
-#: Transaction hashes kept as evidence on one entry.
-MAX_EVIDENCE = 5
-#: Changelog records kept on a card. Older history lives in revisions/.
-MAX_CHANGELOG = 10
+#: Characters in a network name or a label.
+MAX_LABEL = 48
 
 _PRINTABLE = re.compile(r"^[\x20-\x7e]*$")
-_ID_PART = re.compile(r"^[a-z0-9_]+$")
+_ID = re.compile(r"^[a-z0-9_]+$")
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TX_HASH = re.compile(r"^0x[0-9a-fA-F]{64}$")
+_DEST_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
 
 
-class EntryStatus(str, Enum):
-    LEAD = "lead"            # stated by someone, not checked on chain
-    CHECKED = "checked"      # passed the on-chain checks for its kind
-    VERIFIED = "verified"    # used in a route a human approved and that was broadcast
-    DEMOTED = "demoted"      # was checked or verified, then failed
+class RowStatus(str, Enum):
+    UNVERIFIED = "unverified"
+    VERIFIED = "verified"
+    FAILED = "failed"
 
 
-def free_text(value: Optional[str], field: str) -> Optional[str]:
-    """Short, printable, single-line. Anything else is refused, never trimmed."""
+def text_field(
+    value: Optional[str], field: str, limit: int = MAX_FREE_TEXT, allow_code: bool = False
+) -> Optional[str]:
+    """
+    Short, printable, one line, and no Markdown table or code delimiters.
+
+    Refused rather than trimmed or escaped: this text is shown to every later run, and a
+    field that can carry a pipe or a backtick can break out of the cell it was put in.
+    `allow_code` permits backticks in text that is a bullet rather than a cell or a code
+    span, such as a fix ("the domain is `6`, not `8453`").
+    """
     if value is None:
         return None
-    text = str(value)
-    if len(text) > MAX_FREE_TEXT:
-        raise ValueError(f"{field} is {len(text)} characters; the limit is {MAX_FREE_TEXT}.")
+    text = str(value).strip()
+    if len(text) > limit:
+        raise ValueError(f"{field} is {len(text)} characters; the limit is {limit}.")
     if not _PRINTABLE.match(text):
         raise ValueError(f"{field} may contain printable ASCII only, on one line.")
+    if "|" in text or (not allow_code and "`" in text):
+        raise ValueError(f"{field} may not contain '|'" + ("" if allow_code else " or '`'") + ".")
     return text
+
+
+def slug(label: str) -> str:
+    """'Token Messenger' -> 'token_messenger', 'CCTP Domain' -> 'cctp_domain'."""
+    return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
 
 
 def checksummed(value: str, field: str) -> str:
@@ -64,314 +88,248 @@ def checksummed(value: str, field: str) -> str:
         raise ValueError(f"{field} {value!r} is not a valid EVM address.") from exc
 
 
-def revert_id(revert: str) -> str:
-    """Stable id for a revert string, so the same revert seen twice is one entry."""
-    normalised = " ".join(str(revert).lower().split())
-    return "r-" + hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:6]
+class Interface(BaseModel):
+    """A function the protocol exposes, and which contract column it is called on."""
 
-
-class Provenance(BaseModel):
-    """Fields every entry carries. None of them is set by the agent."""
-
-    status: EntryStatus = EntryStatus.LEAD
-    sources: List[str] = Field(default_factory=list)
-    added: Optional[str] = None
-    #: "seed", "human:<name>", or "agent:<model>".
-    added_by: Optional[str] = None
-    verified_count: int = 0
-    last_verified: Optional[str] = None
-    #: Transaction hashes of broadcasts that used this entry, newest last.
-    evidence: List[str] = Field(default_factory=list)
-    consecutive_failures: int = 0
-    last_failure: Optional[str] = None
-
-    @field_validator("evidence")
-    @classmethod
-    def _bounded_evidence(cls, value: List[str]) -> List[str]:
-        return list(value)[-MAX_EVIDENCE:]
-
-    @field_validator("last_failure")
-    @classmethod
-    def _bounded_failure(cls, value: Optional[str]) -> Optional[str]:
-        # A node's revert text, not free text from a model, but still shown to later
-        # runs — so it is bounded, though not refused, since the chain wrote it.
-        return None if value is None else str(value)[:MAX_FREE_TEXT]
-
-
-class ChainRef(BaseModel):
-    scheme: str
-    value: str
-
-
-class Deployment(Provenance):
-    id: str = ""
-    chain_id: int
-    chain: Optional[str] = None
-    #: What this contract does for the protocol, e.g. "token_messenger".
-    role: str
-    version: str = "v1"
-    address: str
-
-    @field_validator("role", "version")
-    @classmethod
-    def _id_safe(cls, value: str) -> str:
-        if not _ID_PART.match(value):
-            raise ValueError(f"{value!r} must be lowercase letters, digits and underscores.")
-        return value
-
-    @field_validator("address")
-    @classmethod
-    def _address(cls, value: str) -> str:
-        return checksummed(value, "address")
-
-    @model_validator(mode="after")
-    def _stable_id(self) -> "Deployment":
-        expected = f"{self.chain_id}/{self.role}/{self.version}"
-        if self.id and self.id != expected:
-            raise ValueError(f"deployment id {self.id!r} should be {expected!r}.")
-        self.id = expected
-        return self
-
-
-class Destination(Provenance):
-    id: str = ""
-    chain_id: int
-    ref: ChainRef
-
-    @model_validator(mode="after")
-    def _stable_id(self) -> "Destination":
-        expected = str(self.chain_id)
-        if self.id and self.id != expected:
-            raise ValueError(f"destination id {self.id!r} should be {expected!r}.")
-        self.id = expected
-        return self
-
-
-class Token(Provenance):
-    id: str = ""
-    chain_id: int
-    symbol: str
-    address: str
-    #: Read from the contract by validation. A seed may state it; the chain wins.
-    decimals: Optional[int] = None
-
-    @field_validator("address")
-    @classmethod
-    def _address(cls, value: str) -> str:
-        return checksummed(value, "address")
-
-    @model_validator(mode="after")
-    def _stable_id(self) -> "Token":
-        expected = f"{self.chain_id}/{self.symbol}"
-        if self.id and self.id != expected:
-            raise ValueError(f"token id {self.id!r} should be {expected!r}.")
-        self.id = expected
-        return self
-
-
-class FunctionParam(BaseModel):
-    name: str
-    type: str
-    meaning: Optional[str] = None
-    #: "code" when reviewed code computes the value and the agent must not choose it.
-    computed_by: Optional[str] = None
-
-    @field_validator("meaning")
-    @classmethod
-    def _meaning(cls, value: Optional[str]) -> Optional[str]:
-        return free_text(value, "meaning")
-
-
-class SpendSpec(BaseModel):
-    """Which argument names the token pulled, and which contract must be approved."""
-
-    #: The name of the parameter holding the token address.
-    token: str
-    #: "self" for the deployment the function is called on, or another role.
-    spender: str = "self"
-
-
-class Function(Provenance):
-    id: str = ""
-    #: The deployment role this function is called on.
-    role: str
+    label: str
     signature: str
-    params: List[FunctionParam] = Field(default_factory=list)
-    spend: Optional[SpendSpec] = None
-    #: Called with eth_call only, never signed.
-    read_only: bool = False
+    #: The address column this is called on, as a slug. None when the card has one.
+    target: Optional[str] = None
+
+    @field_validator("label")
+    @classmethod
+    def _label(cls, value: str) -> str:
+        text = text_field(value, "interface label", MAX_LABEL)
+        if not text or ":" in text or "*" in text:
+            raise ValueError("an interface label may not be empty or contain ':' or '*'.")
+        return text
 
     @field_validator("signature")
     @classmethod
-    def _canonical(cls, value: str) -> str:
+    def _signature(cls, value: str) -> str:
         abi_signature.parse(value)
         return value
 
+    @property
+    def name(self) -> str:
+        return abi_signature.parse(self.signature).name
+
+
+class ChainRow(BaseModel):
+    network: str
+    chain_id: int
+    #: The protocol's identifier for this chain as a destination, e.g. a CCTP domain.
+    dest_id: Optional[str] = None
+    #: A broadcast delivered to this chain using `dest_id`.
+    dest_confirmed: bool = False
+    #: Address column slug -> address.
+    addresses: Dict[str, str] = Field(default_factory=dict)
+    status: RowStatus = RowStatus.UNVERIFIED
+    verified_date: Optional[str] = None
+    #: A transaction hash (the broadcast that verified it) or an allowlisted URL (the
+    #: documentation it was checked against when it was added).
+    evidence: Optional[str] = None
+
+    @field_validator("network")
+    @classmethod
+    def _network(cls, value: str) -> str:
+        text = text_field(value, "network", MAX_LABEL)
+        if not text:
+            raise ValueError("network may not be empty.")
+        return text
+
+    @field_validator("dest_id")
+    @classmethod
+    def _dest_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        if not _DEST_ID.match(value):
+            raise ValueError(f"destination identifier {value!r} is not a plain identifier.")
+        return value
+
+    @field_validator("addresses")
+    @classmethod
+    def _addresses(cls, value: Dict[str, str]) -> Dict[str, str]:
+        return {role: checksummed(addr, f"{role} address") for role, addr in value.items()}
+
+    @field_validator("verified_date")
+    @classmethod
+    def _date(cls, value: Optional[str]) -> Optional[str]:
+        if value and not _DATE.match(value):
+            raise ValueError(f"verified date {value!r} is not YYYY-MM-DD.")
+        return value or None
+
+    @field_validator("evidence")
+    @classmethod
+    def _evidence(cls, value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        if _TX_HASH.match(value) or value.startswith("https://"):
+            return text_field(value, "evidence", 300)
+        raise ValueError(f"evidence {value!r} must be a transaction hash or an https URL.")
+
     @model_validator(mode="after")
-    def _consistent(self) -> "Function":
-        parsed = abi_signature.parse(self.signature)
-        if self.params:
-            # A struct argument is one ABI type, so a function whose only argument is a
-            # tuple describes the tuple's fields. Either way the types must line up.
-            expected_types = parsed.types
-            only = parsed.types[0] if len(parsed.types) == 1 else ""
-            if only.startswith("(") and only.endswith(")"):
-                expected_types = abi_signature.split_top_level(only[1:-1])
-            declared = [p.type for p in self.params]
-            if declared != expected_types:
-                raise ValueError(
-                    f"params {declared} do not match the signature's types {expected_types}."
-                )
-        if self.spend is not None and self.params:
-            names = {p.name for p in self.params}
-            if self.spend.token not in names:
-                raise ValueError(f"spend.token {self.spend.token!r} is not a parameter name.")
-        expected = f"{self.role}/{parsed.name}"
-        if self.id and self.id != expected:
-            raise ValueError(f"function id {self.id!r} should be {expected!r}.")
-        self.id = expected
+    def _verified_has_proof(self) -> "ChainRow":
+        if self.status is RowStatus.VERIFIED and not (self.evidence and _TX_HASH.match(self.evidence)):
+            raise ValueError(
+                f"{self.network} is verified but its evidence is not a transaction hash. "
+                "Only an approved broadcast verifies a row, so it must name one."
+            )
         return self
 
 
-class Parameter(Provenance):
-    id: str
-    value: Any
-    meaning: Optional[str] = None
-
-    @field_validator("meaning")
-    @classmethod
-    def _meaning(cls, value: Optional[str]) -> Optional[str]:
-        return free_text(value, "meaning")
-
-
-class KnownRevert(BaseModel):
+class FailureMode(BaseModel):
     """
-    A revert this protocol produced. Created by code from the node's own revert text,
-    never by the agent; the agent may only propose a `resolution`, which is a lead.
+    A revert, and what fixed it. The revert text is recorded by code from what the node
+    said; a fix is proposed by the agent or written by a person.
     """
 
-    id: str = ""
     revert: str
-    #: The deployment id it was observed on, if it was observed at all.
-    observed_on: Optional[str] = None
-    first_seen: Optional[str] = None
-    #: How many times it has been observed. 0 for a seeded entry nobody has seen here.
-    count: int = 0
-    resolution: Optional[str] = None
-    resolution_status: EntryStatus = EntryStatus.LEAD
-    added_by: Optional[str] = None
+    fix: Optional[str] = None
+    seen: int = 0
 
     @field_validator("revert")
     @classmethod
     def _revert(cls, value: str) -> str:
-        return str(value)[:MAX_FREE_TEXT]
+        text = text_field(value, "revert reason")
+        if not text:
+            raise ValueError("revert reason may not be empty.")
+        return text
 
-    @field_validator("resolution")
+    @field_validator("fix")
     @classmethod
-    def _resolution(cls, value: Optional[str]) -> Optional[str]:
-        return free_text(value, "resolution")
+    def _fix(cls, value: Optional[str]) -> Optional[str]:
+        return text_field(value, "fix", allow_code=True)
 
-    @model_validator(mode="after")
-    def _stable_id(self) -> "KnownRevert":
-        expected = revert_id(self.revert)
-        if self.id and self.id != expected:
-            raise ValueError(f"revert id {self.id!r} should be {expected!r}.")
-        self.id = expected
-        return self
+    @property
+    def key(self) -> str:
+        return normalise_revert(self.revert)
 
 
-class ChangeRecord(BaseModel):
-    """One write, summarised for people reading the card. Never shown to a model."""
-
-    at: str
-    card_version: int
-    cause: str
-    changes: List[str] = Field(default_factory=list)
+def normalise_revert(text: str) -> str:
+    """The same revert seen twice is one failure mode."""
+    return " ".join(str(text).lower().split()).rstrip(".")
 
 
-#: The entry lists on a card, in rendering order.
-ENTRY_KINDS = ("deployments", "destinations", "tokens", "functions", "parameters", "known_reverts")
+def clean_revert(raw: str) -> str:
+    """
+    A node's revert message, reduced to something a card can hold.
+
+    Nodes wrap the reason in their own framing ("execution reverted: ...", a Python
+    exception repr), and some include characters a card refuses. Keep the reason.
+    """
+    text = str(raw or "")
+    match = re.search(r"execution reverted:?\s*([^'\"}]*)", text)
+    if match and match.group(1).strip():
+        text = match.group(1)
+    text = re.sub(r"[^\x20-\x7e]", " ", text).replace("|", "/").replace("`", "'")
+    return " ".join(text.split())[:MAX_FREE_TEXT].strip() or "unspecified revert"
 
 
 class Card(BaseModel):
-    id: str
-    name: str
-    #: "bridge" or "swap". Only bridge cards are offered to discovery today.
-    kind: str = "bridge"
-    network: str = "mainnet"
+    protocol_id: str
+    protocol_name: str
+    docs: List[str] = Field(default_factory=list)
+    supported_chains: List[str] = Field(default_factory=list)
+    supported_tokens: List[str] = Field(default_factory=list)
     card_version: int = 0
-    aliases: List[str] = Field(default_factory=list)
-    #: Hosts whose pages count as this protocol's documentation. Must be allowlisted.
-    documentation: List[str] = Field(default_factory=list)
-    dest_scheme: Optional[str] = None
-    assets: List[str] = Field(default_factory=list)
-    #: False when the pipeline cannot yet execute anything from this card.
-    executable: bool = True
-    blocked_on: List[str] = Field(default_factory=list)
     last_updated: Optional[str] = None
 
-    deployments: List[Deployment] = Field(default_factory=list)
-    destinations: List[Destination] = Field(default_factory=list)
-    tokens: List[Token] = Field(default_factory=list)
-    functions: List[Function] = Field(default_factory=list)
-    parameters: List[Parameter] = Field(default_factory=list)
-    known_reverts: List[KnownRevert] = Field(default_factory=list)
+    interfaces: List[Interface] = Field(default_factory=list)
+    #: Column label for the destination identifier, e.g. "CCTP Domain". None if the
+    #: protocol addresses destinations by EIP-155 chain id.
+    dest_id_label: Optional[str] = None
+    #: Contract column labels without the trailing " Address", e.g. ["Token Messenger"].
+    address_labels: List[str] = Field(default_factory=list)
+    rows: List[ChainRow] = Field(default_factory=list)
+    failure_modes: List[FailureMode] = Field(default_factory=list)
 
-    changelog: List[ChangeRecord] = Field(default_factory=list)
-
-    @field_validator("id")
+    @field_validator("protocol_id")
     @classmethod
     def _id(cls, value: str) -> str:
-        if not _ID_PART.match(value):
-            raise ValueError(f"card id {value!r} must be lowercase letters, digits and underscores.")
+        if not _ID.match(value):
+            raise ValueError(f"protocol_id {value!r} must be lowercase letters, digits and underscores.")
         return value
 
-    @field_validator("kind")
+    @field_validator("protocol_name")
     @classmethod
-    def _kind(cls, value: str) -> str:
-        if value not in ("bridge", "swap"):
-            raise ValueError(f"kind must be 'bridge' or 'swap', not {value!r}.")
+    def _name(cls, value: str) -> str:
+        return text_field(value, "protocol_name", MAX_LABEL) or ""
+
+    @field_validator("docs")
+    @classmethod
+    def _docs(cls, value: List[str]) -> List[str]:
+        for url in value:
+            if not str(url).startswith("https://"):
+                raise ValueError(f"docs entry {url!r} is not an https URL.")
         return value
 
-    @field_validator("changelog")
+    @field_validator("supported_chains", "supported_tokens")
     @classmethod
-    def _bounded_changelog(cls, value: List[ChangeRecord]) -> List[ChangeRecord]:
-        return list(value)[-MAX_CHANGELOG:]
+    def _labels(cls, value: List[str]) -> List[str]:
+        return [text_field(v, "supported entry", MAX_LABEL) or "" for v in value]
+
+    @field_validator("address_labels")
+    @classmethod
+    def _address_labels(cls, value: List[str]) -> List[str]:
+        return [text_field(v, "address column", MAX_LABEL) or "" for v in value]
 
     @model_validator(mode="after")
-    def _limits_and_unique_ids(self) -> "Card":
-        for kind in ENTRY_KINDS:
-            entries = getattr(self, kind)
-            if len(entries) > MAX_ENTRIES_PER_KIND:
+    def _consistent(self) -> "Card":
+        if len(self.rows) > MAX_ROWS:
+            raise ValueError(f"{len(self.rows)} chain rows; the limit is {MAX_ROWS}.")
+        if len(self.failure_modes) > MAX_FAILURE_MODES:
+            raise ValueError(f"{len(self.failure_modes)} failure modes; the limit is {MAX_FAILURE_MODES}.")
+
+        roles = [slug(label) for label in self.address_labels]
+        if len(set(roles)) != len(roles):
+            raise ValueError("two address columns share a name.")
+        for iface in self.interfaces:
+            if iface.target is None and len(roles) > 1:
                 raise ValueError(
-                    f"{kind} has {len(entries)} entries; the limit is {MAX_ENTRIES_PER_KIND}."
+                    f"interface {iface.label!r} does not say which contract it is called on, "
+                    f"and the card has {len(roles)}."
                 )
-            seen = set()
-            for entry in entries:
-                if entry.id in seen:
-                    raise ValueError(f"{kind} has two entries with id {entry.id!r}.")
-                seen.add(entry.id)
+            if iface.target is not None and iface.target not in roles:
+                raise ValueError(f"interface {iface.label!r} targets unknown column {iface.target!r}.")
+
+        seen_ids = set()
+        for row in self.rows:
+            if row.chain_id in seen_ids:
+                raise ValueError(f"two rows for chain id {row.chain_id}.")
+            seen_ids.add(row.chain_id)
+            unknown = set(row.addresses) - set(roles)
+            if unknown:
+                raise ValueError(f"{row.network} has addresses for unknown columns {sorted(unknown)}.")
+            if row.dest_id and not self.dest_id_label:
+                raise ValueError(f"{row.network} has a destination identifier but the card has no column for it.")
+
+        keys = [f.key for f in self.failure_modes]
+        if len(set(keys)) != len(keys):
+            raise ValueError("the same revert is listed twice.")
         return self
 
-    def entries(self, kind: str) -> List[Any]:
-        if kind not in ENTRY_KINDS:
-            raise KeyError(kind)
-        return getattr(self, kind)
+    # --------------------------------------------------------------- lookups
 
-    def entry(self, kind: str, entry_id: str) -> Optional[Any]:
-        return next((e for e in self.entries(kind) if e.id == entry_id), None)
+    @property
+    def roles(self) -> List[str]:
+        return [slug(label) for label in self.address_labels]
 
-    def statuses(self) -> Dict[str, str]:
-        """`kind:id` → status, for diffing two versions of a card."""
-        out: Dict[str, str] = {}
-        for kind in ENTRY_KINDS:
-            for entry in self.entries(kind):
-                status = getattr(entry, "status", None) or getattr(entry, "resolution_status")
-                out[f"{kind}:{entry.id}"] = status.value
-        return out
+    @property
+    def dest_scheme(self) -> Optional[str]:
+        return slug(self.dest_id_label) if self.dest_id_label else None
+
+    def row(self, chain_id: int) -> Optional[ChainRow]:
+        return next((r for r in self.rows if r.chain_id == int(chain_id)), None)
+
+    def interfaces_for(self, role: str) -> List[Interface]:
+        return [i for i in self.interfaces if (i.target or (self.roles[0] if self.roles else None)) == role]
+
+    def failure_mode(self, revert: str) -> Optional[FailureMode]:
+        key = normalise_revert(revert)
+        return next((f for f in self.failure_modes if f.key == key), None)
 
 
 class CardDocument(BaseModel):
     card: Card
-    body: str = ""
     file_path: Optional[str] = None

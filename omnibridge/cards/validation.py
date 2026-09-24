@@ -1,21 +1,17 @@
 """
-On-chain checks for card entries. See docs/PROTOCOL_CARDS.md, section 6.3.
+The automated code check a card fact must pass before it is written.
 
-These decide whether a `lead` may become `checked`, and nothing else. They never make
-an entry `verified` (only an approved broadcast does that) and never demote one (only a
-run outcome does that): a check that fails on an entry already checked or verified is
-reported, and the status is left alone. A transient RPC problem must not be able to
-erase what a broadcast established.
+Step 2 of the lifecycle in docs/AGENTIC_OMNIBRIDGE.md: bytecode exists at the address,
+and the selectors of the card's interfaces are in it. A row that passes is saved as
+`unverified`; only an approved broadcast makes it `verified` (cards.writeback).
 
-Every check is one that already guards route proposals, reused rather than rewritten:
+Every check reuses one that already guards route proposals:
 `provenance.verify_proposal` for bytecode, the EIP-1967 proxy and the selector, and
-`erc20` for a token's own symbol and decimals.
+`provenance.check_sources` for the documentation source.
 
-Fail closed. No reachable node of the right chain means the entry stays where it is,
-never "checked for now".
-
-Destinations and parameters have no generic on-chain check, so they are not handled
-here. They stay leads until a broadcast uses them.
+Fail closed. No reachable node that confirms the row's chain means the row is not
+written — never "unverified for now", because an unreachable chain would otherwise be a
+way to write unchecked addresses.
 """
 
 from dataclasses import dataclass, field
@@ -23,186 +19,134 @@ from typing import Callable, Dict, List, Optional
 
 from web3 import Web3
 
-from omnibridge.agent.contract import allowed_domains
 from omnibridge.agent.provenance import check_sources, verify_proposal
-from omnibridge.cards.models import Card, Deployment, EntryStatus, Function, Token
-from omnibridge.core import erc20
+from omnibridge.cards.models import Card, ChainRow, Interface
 
-#: chain id → a Web3 whose node confirmed that chain id, or None.
+#: chain id → a Web3 whose node confirmed that chain id and serves eth_getCode, or None.
 Web3ForChain = Callable[[int], Optional[Web3]]
 
 
 @dataclass
-class EntryCheck:
-    kind: str
-    entry_id: str
-    current: EntryStatus
-    #: What the status would be after this check. Only ever lead → checked.
-    proposed: EntryStatus
+class CheckResult:
+    subject: str
     passed: bool
     checks: Dict[str, bool] = field(default_factory=dict)
     reasons: List[str] = field(default_factory=list)
-    #: Facts read from the chain, e.g. a token's decimals or a proxy's implementation.
     observed: Dict[str, object] = field(default_factory=dict)
 
-    @property
-    def changes_status(self) -> bool:
-        return self.proposed != self.current
+    def as_dict(self) -> Dict[str, object]:
+        return {
+            "subject": self.subject,
+            "passed": self.passed,
+            "checks": self.checks,
+            "reasons": self.reasons,
+            "observed": self.observed,
+        }
 
 
-def _outcome(kind: str, entry, passed: bool, checks, reasons, observed=None) -> EntryCheck:
-    current = entry.status
-    proposed = EntryStatus.CHECKED if (passed and current == EntryStatus.LEAD) else current
-    if not passed and current in (EntryStatus.CHECKED, EntryStatus.VERIFIED):
-        reasons = [*reasons, f"Status left at {current.value}: only a run outcome demotes."]
-    return EntryCheck(kind, entry.id, current, proposed, passed, checks, reasons, observed or {})
-
-
-def _has_primary_source(sources: List[str], domains: List[str]) -> bool:
+def has_documentation_source(sources: List[str], domains: List[str]) -> bool:
     return bool(check_sources(sources, domains)["primary"])
 
 
-def check_deployment(card: Card, dep: Deployment, w3: Optional[Web3], domains: List[str]) -> EntryCheck:
-    """Bytecode holds every selector recorded for this role, and a doc source names it."""
-    checks: Dict[str, bool] = {}
-    reasons: List[str] = []
-    observed: Dict[str, object] = {}
+def check_row(
+    card: Card,
+    row: ChainRow,
+    w3: Optional[Web3],
+    domains: List[str],
+    sources: Optional[List[str]] = None,
+) -> CheckResult:
+    """
+    Every address in the row holds every selector the card's interfaces declare for its
+    column, and (when `sources` is given) a documentation source names it.
 
-    functions = [
-        f for f in card.functions if f.role == dep.role and f.status != EntryStatus.DEMOTED
-    ]
-    checks["documentation_source"] = _has_primary_source(dep.sources, domains)
-    if not checks["documentation_source"]:
-        reasons.append("No source from the documentation allowlist names this address.")
+    `sources` is None when re-checking a row already on the card, whose documentation
+    was checked when it was added.
+    """
+    result = CheckResult(subject=f"{row.network} ({row.chain_id})", passed=False)
 
-    if not functions:
-        reasons.append(
-            f"No function is recorded for role {dep.role!r}. Bytecode alone does not say "
-            "what a contract is, so there is nothing to check it against."
-        )
-        return _outcome("deployments", dep, False, checks, reasons)
+    if sources is not None:
+        result.checks["documentation_source"] = has_documentation_source(sources, domains)
+        if not result.checks["documentation_source"]:
+            result.reasons.append("No source from the documentation allowlist names this row.")
+
+    if not row.addresses:
+        result.reasons.append("The row names no contract address, so there is nothing to check.")
+        return result
 
     if w3 is None:
-        checks["chain_identity"] = False
-        reasons.append(f"No RPC endpoint confirmed chain {dep.chain_id}; nothing was checked.")
-        return _outcome("deployments", dep, False, checks, reasons)
-    checks["chain_identity"] = True
+        result.checks["chain_identity"] = False
+        result.reasons.append(f"No RPC endpoint confirmed chain {row.chain_id}; nothing was checked.")
+        return result
+    result.checks["chain_identity"] = True
 
-    selectors_ok = True
-    for fn in functions:
-        # Sources are passed so the report is complete, but decided above; here the
-        # report is read for its on-chain facts.
-        report = verify_proposal(w3, dep.address, fn.signature, dep.sources, allowed_domains=domains)
-        checks["bytecode"] = report.is_contract
-        if report.implementation_address:
-            observed["implementation"] = report.implementation_address
-        if not report.is_contract:
-            reasons += [f for f in report.failures if "bytecode" in f or "valid EVM" in f]
-            return _outcome("deployments", dep, False, checks, reasons, observed)
-        checks[f"selector:{fn.id}"] = report.selector_present
-        if not report.selector_present:
-            selectors_ok = False
-            reasons += [f for f in report.failures if "Selector" in f]
+    for role, address in row.addresses.items():
+        interfaces = card.interfaces_for(role)
+        if not interfaces:
+            result.checks[f"{role}:interfaces"] = False
+            result.reasons.append(
+                f"No interface is recorded for {role}. Bytecode alone does not say what a "
+                "contract is, so there is nothing to check it against."
+            )
+            continue
+        for iface in interfaces:
+            report = verify_proposal(w3, address, iface.signature, [], allowed_domains=domains)
+            if report.implementation_address:
+                result.observed[f"{role}:implementation"] = report.implementation_address
+            result.checks[f"{role}:bytecode"] = report.is_contract
+            if not report.is_contract:
+                result.reasons += [f"{role}: {f}" for f in report.failures]
+                break
+            result.checks[f"{role}:{iface.name}"] = report.selector_present
+            if not report.selector_present:
+                result.reasons.append(
+                    f"{role} {address}: selector {report.selector} for {iface.signature} "
+                    "is absent from its bytecode."
+                )
 
-    passed = checks["documentation_source"] and selectors_ok
-    return _outcome("deployments", dep, passed, checks, reasons, observed)
+    result.passed = all(result.checks.values())
+    return result
 
 
-def check_token(tok: Token, w3: Optional[Web3], domains: List[str]) -> EntryCheck:
+def check_interface(
+    card: Card, iface: Interface, web3_for: Web3ForChain, domains: List[str]
+) -> CheckResult:
     """
-    Bytecode, the contract's own symbol, decimals read from the chain, and a doc source.
-
-    The source requirement is stricter than the design doc's first draft: anyone can
-    deploy a contract that answers `symbol()` with "USDC", and this address becomes the
-    token a route approves.
+    A new interface must not contradict a contract already on the card: every row
+    address in its column whose bytecode can be read must hold its selector. An
+    unreadable node is skipped, never counted against it — found live, a public node
+    that confirmed its chain id and then failed eth_getCode.
     """
-    checks: Dict[str, bool] = {}
-    reasons: List[str] = []
-    observed: Dict[str, object] = {}
-
-    checks["documentation_source"] = _has_primary_source(tok.sources, domains)
-    if not checks["documentation_source"]:
-        reasons.append("No source from the documentation allowlist names this token address.")
-
-    if w3 is None:
-        checks["chain_identity"] = False
-        reasons.append(f"No RPC endpoint confirmed chain {tok.chain_id}; nothing was checked.")
-        return _outcome("tokens", tok, False, checks, reasons)
-    checks["chain_identity"] = True
-
-    try:
-        code = w3.eth.get_code(Web3.to_checksum_address(tok.address))
-    except Exception as exc:
-        reasons.append(f"Could not read bytecode: {exc}")
-        return _outcome("tokens", tok, False, checks, reasons)
-    checks["bytecode"] = len(code) > 0
-    if not checks["bytecode"]:
-        reasons.append(f"{tok.address} holds no bytecode.")
-        return _outcome("tokens", tok, False, checks, reasons)
-
-    symbol = erc20.read_symbol(w3, tok.address)
-    observed["symbol"] = symbol
-    checks["symbol"] = bool(symbol) and symbol.upper() == tok.symbol.upper()
-    if not checks["symbol"]:
-        reasons.append(f"The contract calls itself {symbol!r}, not {tok.symbol!r}.")
-
-    decimals = erc20.read_decimals(w3, tok.address)
-    observed["decimals"] = decimals
-    checks["decimals"] = decimals is not None and (tok.decimals is None or tok.decimals == decimals)
-    if decimals is None:
-        reasons.append("The contract did not answer decimals().")
-    elif tok.decimals is not None and tok.decimals != decimals:
-        reasons.append(f"The card says {tok.decimals} decimals; the contract says {decimals}.")
-
-    passed = all(checks.values())
-    return _outcome("tokens", tok, passed, checks, reasons, observed)
-
-
-def check_function(card: Card, fn: Function, web3_for: Web3ForChain, domains: List[str]) -> EntryCheck:
-    """
-    The selector is present at a deployment of this role, and absent from none.
-
-    One confirming deployment is enough; a reachable deployment of the same role that
-    lacks the selector is a contradiction and fails the check, since ids carry a version
-    and two contracts in one role and version should implement the same functions.
-    """
-    checks: Dict[str, bool] = {}
-    reasons: List[str] = []
-    deployments = [
-        d for d in card.deployments if d.role == fn.role and d.status != EntryStatus.DEMOTED
-    ]
-    if not deployments:
-        reasons.append(f"No deployment with role {fn.role!r} to check the selector against.")
-        return _outcome("functions", fn, False, checks, reasons)
-
-    confirmed, contradicted = 0, 0
-    for dep in deployments:
-        w3 = web3_for(dep.chain_id)
+    result = CheckResult(subject=iface.signature, passed=True)
+    role = iface.target or (card.roles[0] if card.roles else None)
+    if role is None:
+        result.passed = False
+        result.reasons.append("The card has no contract column to call this on.")
+        return result
+    for row in card.rows:
+        address = row.addresses.get(role)
+        if not address:
+            continue
+        w3 = web3_for(row.chain_id)
         if w3 is None:
-            reasons.append(f"{dep.id}: no RPC confirmed chain {dep.chain_id}; skipped.")
+            result.reasons.append(f"{row.network}: no usable node; skipped.")
             continue
-        report = verify_proposal(w3, dep.address, fn.signature, [], allowed_domains=domains)
+        report = verify_proposal(w3, address, iface.signature, [], allowed_domains=domains)
         if not report.is_contract:
-            # Unreadable, or no code at all. Neither says anything about this function:
-            # a flaky node must not count as evidence against it. The deployment's own
-            # check reports what is wrong with the address.
-            reasons.append(f"{dep.id}: bytecode not available ({'; '.join(report.failures)}); skipped.")
+            result.reasons.append(f"{row.network}: bytecode not readable; skipped.")
             continue
-        checks[f"selector@{dep.id}"] = report.selector_present
-        if report.selector_present:
-            confirmed += 1
-        else:
-            contradicted += 1
-            reasons.append(f"{dep.id}: selector absent from its bytecode.")
-
-    passed = confirmed > 0 and contradicted == 0
-    if confirmed == 0 and contradicted == 0:
-        reasons.append("No deployment of this role could be reached.")
-    return _outcome("functions", fn, passed, checks, reasons)
+        result.checks[f"{row.network}"] = report.selector_present
+        if not report.selector_present:
+            result.passed = False
+            result.reasons.append(f"{row.network} {address} does not implement {iface.signature}.")
+    return result
 
 
 def default_web3_for() -> Web3ForChain:
-    """Resolve a chain id through the public registry and connect to a node that confirms it."""
+    """
+    Resolve a chain id through the public registry and connect to a node that confirms
+    it *and* serves eth_getCode. Confirming the chain id is not the same as serving the
+    reads these checks make.
+    """
     from omnibridge.core.simulator import Simulator
     from omnibridge.discovery.rpc_manager import RPCManager
 
@@ -221,8 +165,6 @@ def default_web3_for() -> Web3ForChain:
             w3, _url = Simulator([url], chain_id).connect_verified()
             if w3 is None:
                 continue
-            # Confirming the chain id is not the same as serving the reads these checks
-            # make: public nodes that answer eth_chainId and fail eth_getCode exist.
             try:
                 w3.eth.get_code("0x0000000000000000000000000000000000000000")
             except Exception:
@@ -234,40 +176,11 @@ def default_web3_for() -> Web3ForChain:
     return web3_for
 
 
-def check_card(
-    card: Card,
-    web3_for: Optional[Web3ForChain] = None,
-    domains: Optional[List[str]] = None,
-) -> List[EntryCheck]:
-    """Run every applicable check on every entry that is not demoted."""
+def check_card(card: Card, web3_for: Optional[Web3ForChain] = None,
+               domains: Optional[List[str]] = None) -> List[CheckResult]:
+    """Re-run the code check over every row on a card. Reports; never changes a status."""
+    from omnibridge.agent.contract import allowed_domains
+
     web3_for = web3_for or default_web3_for()
     domains = allowed_domains() if domains is None else domains
-    results: List[EntryCheck] = []
-    for dep in card.deployments:
-        if dep.status != EntryStatus.DEMOTED:
-            results.append(check_deployment(card, dep, web3_for(dep.chain_id), domains))
-    for tok in card.tokens:
-        if tok.status != EntryStatus.DEMOTED:
-            results.append(check_token(tok, web3_for(tok.chain_id), domains))
-    for fn in card.functions:
-        if fn.status != EntryStatus.DEMOTED:
-            results.append(check_function(card, fn, web3_for, domains))
-    return results
-
-
-def apply_checks(card: Card, results: List[EntryCheck], checked_on: str) -> Card:
-    """
-    A copy of the card with passing leads raised to `checked`, and token decimals set
-    from the chain. Nothing else changes.
-    """
-    updated = card.model_copy(deep=True)
-    for result in results:
-        entry = updated.entry(result.kind, result.entry_id)
-        if entry is None:
-            continue
-        if result.kind == "tokens" and result.passed and result.observed.get("decimals") is not None:
-            entry.decimals = int(result.observed["decimals"])
-        if result.changes_status:
-            entry.status = result.proposed
-            entry.added = entry.added or checked_on
-    return updated
+    return [check_row(card, row, web3_for(row.chain_id), domains) for row in card.rows]

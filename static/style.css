@@ -915,3 +915,77 @@ body {
   font-size: 0.74rem;
   color: var(--text-muted);
 }
+
+/* ---------------------------------------------------------------------------
+   Protocol cards. Colours come from the --on-* status tokens so the badges stay
+   readable in light mode, for the same reason every other status colour does.
+   --------------------------------------------------------------------------- */
+
+.cards-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+.protocol-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 1rem;
+  min-width: 0;
+}
+.protocol-card .skill-desc code { font-size: 0.78rem; }
+.table-scroll { overflow-x: auto; margin: 0.5rem 0 0.25rem; }
+.chain-cache {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.chain-cache th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+.chain-cache td {
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  vertical-align: top;
+  white-space: nowrap;
+}
+.chain-cache tr:last-child td { border-bottom: none; }
+.chain-cache code { font-family: var(--font-mono); font-size: 0.75rem; }
+.skill-badge.pending { background: rgba(148, 163, 184, 0.15); color: var(--text-secondary); }
+.confirmed { font-size: 0.7rem; color: var(--on-green); }
+.failure-mode {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border-color);
+}
+.failure-mode:last-of-type { border-bottom: none; }
+.failure-mode code { color: var(--on-rose); font-family: var(--font-mono); font-size: 0.75rem; }
+.failure-fix { margin-top: 0.2rem; color: var(--text-muted); line-height: 1.45; }
+.protocol-card .skill-meta { margin-top: 0.75rem; gap: 1rem; flex-wrap: wrap; }
+.protocol-card .skill-meta a { color: var(--accent-cyan); }
+
+/* The agent's tool calls, collapsed by default: evidence, not the headline. */
+.tool-calls { margin-top: 0.85rem; font-size: 0.82rem; }
+.tool-calls summary {
+  cursor: pointer;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.tool-calls .provenance-row { word-break: break-word; }
+.tool-calls code { font-family: var(--font-mono); font-size: 0.75rem; }
+
+.plan-step-body.fork-ok  { color: var(--on-green); }
+.plan-step-body.fork-bad { color: var(--on-rose); word-break: break-word; }
+.chain-cache a { color: var(--accent-cyan); }

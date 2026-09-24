@@ -8,9 +8,11 @@ written, and only a broadcast that a human approved can mark an entry verified.
 
 Written 2026-09-24, against commit `c2bb478`.
 
-**Status:** PR 1 (storage, format, checks, CCTP seed) is built; see section 9. Where the
-build differs from the first draft of this document, the text below has been updated
-and says so.
+**Status:** superseded in part by [AGENTIC_OMNIBRIDGE.md](AGENTIC_OMNIBRIDGE.md). The card
+*format* below (facts in frontmatter; statuses lead/checked/verified/demoted) was replaced
+by the plan's layout: facts in the Markdown body, statuses unverified/verified/failed. The
+reasoning here still applies: Rule B (section 2), the security analysis (section 7) and
+the shared storage (section 4.1).
 
 ---
 

@@ -60,6 +60,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const outputSection = document.getElementById("output-section");
   const skillsGrid = document.getElementById("skills-grid");
   const refreshSkillsBtn = document.getElementById("refresh-skills-btn");
+  const cardsGrid = document.getElementById("cards-grid");
+  const refreshCardsBtn = document.getElementById("refresh-cards-btn");
   const recipientInput = document.getElementById("recipient-input");
   const connectWalletBtn = document.getElementById("connect-wallet-btn");
   const walletBtnText = document.getElementById("wallet-btn-text");
@@ -325,6 +327,91 @@ document.addEventListener("DOMContentLoaded", () => {
   refreshSkillsBtn.addEventListener("click", loadSkills);
   loadSkills();
 
+  // ------------------------------------------------------------ protocol cards
+
+  const ROW_STATUS = {
+    verified: { cls: "ok", label: "verified" },
+    unverified: { cls: "pending", label: "unverified" },
+    failed: { cls: "bad", label: "failed" },
+  };
+
+  function shortHex(value, head = 6, tail = 4) {
+    const v = String(value || "");
+    return v.length > head + tail + 3 ? `${v.slice(0, head)}…${v.slice(-tail)}` : v;
+  }
+
+  function renderEvidence(evidence) {
+    if (!evidence) return `<span class="muted">—</span>`;
+    if (evidence.startsWith("0x")) return `<code title="${esc(evidence)}">tx ${esc(shortHex(evidence, 8, 6))}</code>`;
+    return `<a href="${esc(evidence)}" target="_blank" rel="noopener noreferrer">docs</a>`;
+  }
+
+  // Everything shown here comes from /api/cards, which serves the parsed card — the
+  // same values the agent is given — so the page cannot display a fact the parser refused.
+  async function loadCards() {
+    try {
+      const res = await fetch("/api/cards");
+      if (!res.ok) return;
+      const cards = await res.json();
+      if (cards.length === 0) {
+        cardsGrid.innerHTML = `<p class="subtitle">No protocol cards yet. Add one under <code>protocols/&lt;protocol_id&gt;/CARD.md</code>, or let the agent propose one.</p>`;
+        return;
+      }
+      cardsGrid.innerHTML = cards.map((c) => {
+        const addressCols = c.address_labels.map((l) => l.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, ""));
+        return `
+          <div class="protocol-card">
+            <div class="skill-name">
+              <span>📘 ${esc(c.protocol_name)}</span>
+              <span class="muted">v${esc(c.card_version)} · ${esc(c.last_updated) || "—"}</span>
+            </div>
+            <div class="skill-desc">
+              ${c.interfaces.map((i) => `<code>${esc(i.signature)}</code>`).join("<br>")}
+            </div>
+            <div class="table-scroll">
+              <table class="chain-cache">
+                <thead><tr>
+                  <th>Network</th><th>Chain</th>
+                  ${c.dest_id_label ? `<th>${esc(c.dest_id_label)}</th>` : ""}
+                  ${c.address_labels.map((l) => `<th>${esc(l)}</th>`).join("")}
+                  <th>Status</th><th>Evidence</th>
+                </tr></thead>
+                <tbody>
+                  ${c.rows.map((r) => {
+                    const st = ROW_STATUS[r.status] || ROW_STATUS.unverified;
+                    return `<tr>
+                      <td>${esc(r.network)}</td>
+                      <td>${esc(r.chain_id)}</td>
+                      ${c.dest_id_label ? `<td>${esc(r.dest_id ?? "—")}${r.dest_confirmed ? ` <span class="confirmed" title="A broadcast delivered to this chain using this identifier">✓ confirmed</span>` : ""}</td>` : ""}
+                      ${addressCols.map((k) => `<td><code title="${esc(r.addresses[k] || "")}">${esc(shortHex(r.addresses[k]) || "—")}</code></td>`).join("")}
+                      <td><span class="skill-badge ${st.cls}">${st.label}</span>${r.verified_date ? `<div class="muted">${esc(r.verified_date)}</div>` : ""}</td>
+                      <td>${renderEvidence(r.evidence)}</td>
+                    </tr>`;
+                  }).join("")}
+                </tbody>
+              </table>
+            </div>
+            ${c.failure_modes.length ? `
+              <div class="telemetry-subhead">Learned failure modes</div>
+              ${c.failure_modes.map((f) => `
+                <div class="failure-mode">
+                  <code>${esc(f.revert)}</code>${f.seen ? ` <span class="muted">seen ${esc(f.seen)}×</span>` : ` <span class="muted">not yet seen in a run</span>`}
+                  ${f.fix ? `<div class="failure-fix">Fix: ${esc(f.fix)}</div>` : ""}
+                </div>`).join("")}` : ""}
+            <div class="skill-meta">
+              <span>${esc(c.supported_tokens.join(", "))}</span>
+              <span>${c.docs.map((u) => `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(new URL(u).pathname.split("/").filter(Boolean).pop() || new URL(u).host)}</a>`).join(" · ")}</span>
+            </div>
+          </div>`;
+      }).join("");
+    } catch (e) {
+      console.error("Failed to load cards:", e);
+    }
+  }
+
+  refreshCardsBtn.addEventListener("click", loadCards);
+  loadCards();
+
   // ------------------------------------------------------------- live log
 
   const LEVEL_CLASS = {
@@ -504,7 +591,9 @@ document.addEventListener("DOMContentLoaded", () => {
         SKILL_MEMORY_CACHE: { tag: "tag-purple", label: "⚡ Skill cache hit" },
         AGENT_RUNTIME_DISCOVERY: { tag: "tag-green", label: "🤖 Discovered at runtime" },
         AGENT_NO_ROUTE: { tag: "tag-amber", label: "⚠ No route found" },
-      }[t2.source_type] || { tag: "tag-blue", label: esc(t2.source_type) };
+        PROPOSAL_REJECTED: { tag: "tag-amber", label: "↺ Proposal refused, retrying" },
+      }[t2.outcome === "PROPOSAL_REJECTED" ? "PROPOSAL_REJECTED" : t2.source_type]
+        || { tag: "tag-blue", label: esc(t2.source_type) };
 
       const ev = data && data.agent_evidence;
       const prov = ev && ev.provenance;
@@ -525,7 +614,9 @@ document.addEventListener("DOMContentLoaded", () => {
             ${t2.model ? `<div class="telemetry-item"><div class="telemetry-key">Model</div><div class="telemetry-val">${esc(t2.model)}</div></div>` : ""}
           </div>
           ${t2.reason ? `<p class="telemetry-note">${esc(t2.reason)}</p>` : ""}
+          ${renderCardContext(t2)}
           ${prov ? renderProvenance(prov, proposal) : ""}
+          ${renderToolCalls(t2.agent_tools)}
           ${t2.budget ? `<p class="telemetry-note">Budget: ${esc(t2.budget.model_calls)} model call(s), ${esc(t2.budget.input_tokens)} in / ${esc(t2.budget.output_tokens)} out tokens, ${orUnmeasured(t2.budget.wall_seconds, (v) => v.toFixed(1) + "s")}.</p>` : ""}
         </div>`;
     }
@@ -552,7 +643,7 @@ document.addEventListener("DOMContentLoaded", () => {
       html += `
         <div class="telemetry-step-card">
           <div class="telemetry-header">
-            <div class="telemetry-title"><span>🧪</span><span>Step 4: Dry-Run Simulation (eth_call)</span></div>
+            <div class="telemetry-title"><span>🧪</span><span>Step 4: Dry-Run Simulation (${t4.fork ? "eth_call + Anvil fork" : "eth_call"})</span></div>
             <span class="telemetry-tag ${v.tag}">${v.label}</span>
           </div>
           <div class="telemetry-grid">
@@ -563,6 +654,7 @@ document.addEventListener("DOMContentLoaded", () => {
             <div class="telemetry-item"><div class="telemetry-key">Estimated Gas</div><div class="telemetry-val">${orUnmeasured(t4.estimated_gas_usd, (n) => "$" + Number(n).toFixed(4) + " USD")}</div></div>
           </div>
           <p class="telemetry-note">${v.note}</p>
+          ${renderForkRun(t4.fork)}
           ${t4.revert_reason ? `<pre class="code-box code-error">${esc(t4.revert_reason)}</pre>` : ""}
         </div>`;
     }
@@ -581,11 +673,93 @@ document.addEventListener("DOMContentLoaded", () => {
           </div>
           ${te.error ? `<pre class="code-box code-error">${esc(te.error)}</pre>` : ""}
           ${te.demoted_skill ? `<p class="telemetry-note">The cached route failed verification, so it is no longer served. It is retained on disk — a failure demotes a skill, it never rewrites one.</p>` : ""}
+          ${te.card_note ? `<p class="telemetry-note">📘 ${esc(te.card_note)} The revert was recorded on the card; an unverified row it relied on is now marked failed.</p>` : ""}
+          ${te.known_fix ? `<p class="telemetry-note">The card's known fix for this revert was passed to the retry: <em>${esc(te.known_fix)}</em></p>` : ""}
+        </div>`;
+    }
+
+    if (traces.step_6_broadcast && (traces.step_6_broadcast.card_path || traces.step_6_broadcast.card_save_error)) {
+      const t6 = traces.step_6_broadcast;
+      html += `
+        <div class="telemetry-step-card">
+          <div class="telemetry-header">
+            <div class="telemetry-title"><span>📘</span><span>Protocol Card Write-back</span></div>
+            <span class="telemetry-tag ${t6.card_save_error ? "tag-amber" : "tag-green"}">${t6.card_save_error ? "Not recorded" : "Row verified"}</span>
+          </div>
+          <p class="telemetry-note">${t6.card_save_error
+            ? `The transfer went through; recording it on the card did not (<code>${esc(t6.card_save_error)}</code>). Nothing about the transaction is affected.`
+            : `The card row whose contract this broadcast called is now <strong>verified</strong>, with <code>${esc(shortHex(t6.tx_hash, 10, 8))}</code> as its evidence, and the destination's identifier is marked confirmed.`}</p>
         </div>`;
     }
 
     html += `</div>`;
     return html;
+  }
+
+  function renderCardContext(t2) {
+    const offered = t2.cards_offered;
+    const match = t2.card_match || (t2.evidence && t2.evidence.card_match);
+    if (!offered && !match) return "";
+    let out = `<div class="provenance"><div class="telemetry-subhead">Protocol cards</div>`;
+    out += `<div class="provenance-row"><span>📘</span><span>Offered to the agent: ${offered && offered.length ? offered.map((c) => `<code>${esc(c)}</code>`).join(", ") : "none applied to this route"}</span></div>`;
+    if (match) {
+      const st = ROW_STATUS[match.source_status] || ROW_STATUS.unverified;
+      out += `<div class="provenance-row"><span>🔗</span><span>Router matches card <code>${esc(match.protocol_id)}</code>, chain ${esc(match.source_chain_id)} row (<span class="skill-badge ${st.cls}">${st.label}</span>), matched on the contract address</span></div>`;
+      if (match.dest_agrees === true) {
+        out += `<div class="provenance-row"><span class="ok">✓</span><span>Destination ${esc(match.dest_id)} agrees with the card${match.card_dest_confirmed ? " (confirmed by a broadcast)" : ""}</span></div>`;
+      } else if (match.dest_agrees === false) {
+        out += `<div class="provenance-row"><span class="bad">✗</span><span>Destination ${esc(match.dest_id)} disagrees with the card's ${esc(match.card_dest_id)}</span></div>`;
+      }
+    } else if (offered && offered.length) {
+      out += `<div class="provenance-row"><span class="muted">·</span><span>The proposed router is not on any card; it was established from documentation alone.</span></div>`;
+    }
+    return out + `</div>`;
+  }
+
+  function summariseTool(call) {
+    const r = call.result || {};
+    const i = call.input || {};
+    if (r.ok === false && r.error) return esc(r.error);
+    switch (call.tool) {
+      case "fetch_bytecode_and_verify":
+        return `${esc(shortHex(i.contract_address))} on ${esc(i.chain_id)}: ${r.has_bytecode ? "bytecode ✓" : "no bytecode ✗"}, selector ${r.selector_present ? "✓" : "✗"}${r.implementation ? ` (via proxy ${esc(shortHex(r.implementation))})` : ""}`;
+      case "encode_jit_payload":
+        return `${esc(i.abi_signature)} → ${esc(r.selector)}…, ${esc(r.bytes)} bytes`;
+      case "simulate_transaction":
+        return `${esc(r.mode)}${i.approve ? " (approve first)" : ""}: ${r.success ? `✓ ${esc(r.gas_used ?? "?")} gas` : `✗ ${esc(r.failed_step || "call")} — ${esc(r.revert_reason || r.status || "failed")}`}`;
+      case "resolve_token_address":
+        return `${esc(i.symbol)} on ${esc(i.chain_id)} → ${esc(shortHex(r.address))}, ${esc(r.decimals)} decimals${r.corroborated ? " ✓" : " ✗ not corroborated"}`;
+      case "propose_card_update":
+        return `${esc((i.patch_data || {}).kind)} on ${esc(i.protocol_id)}: ${r.accepted ? `saved ${esc(r.status || "")}` : `refused — ${esc((r.reasons || []).join("; "))}`}`;
+      default:
+        return "";
+    }
+  }
+
+  function renderToolCalls(tools) {
+    if (!tools || !tools.log || !tools.log.length) return "";
+    return `
+      <details class="tool-calls">
+        <summary>Agent checked its work with ${tools.calls} tool call${tools.calls === 1 ? "" : "s"}</summary>
+        ${tools.log.map((c) => {
+          const ok = c.result && c.result.ok !== false && c.result.success !== false && c.result.accepted !== false;
+          return `<div class="provenance-row"><span class="${ok ? "ok" : "bad"}">${ok ? "✓" : "✗"}</span><span><code>${esc(c.tool)}</code> ${summariseTool(c)}</span></div>`;
+        }).join("")}
+      </details>`;
+  }
+
+  function renderForkRun(fork) {
+    if (!fork) return "";
+    return `
+      <div class="provenance">
+        <div class="telemetry-subhead">Forked simulation of the whole plan</div>
+        ${fork.steps.map((st) => `
+          <div class="provenance-row">
+            <span class="${st.success ? "ok" : "bad"}">${st.success ? "✓" : "✗"}</span>
+            <span>${esc(st.label)}: ${st.success ? `${esc(st.gas_used)} gas` : esc(st.revert_reason)}${st.infrastructure_error ? " <span class=\"muted\">(the fork could not answer; not counted)</span>" : ""}</span>
+          </div>`).join("")}
+        <p class="telemetry-note">Every step ran in order on an Anvil fork of chain ${esc(fork.chain_id)}, with your real balances, so a later step was checked with the earlier ones applied. Evidence only: each step is re-checked live before you sign it.</p>
+      </div>`;
   }
 
   function renderProvenance(prov, proposal) {
@@ -790,6 +964,8 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
                 </div>` : ""}
               ${st.revert_reason ? `<pre class="code-box code-error">${esc(st.revert_reason)}</pre>` : ""}
               ${st.gas_used ? `<div class="plan-step-body"><span class="muted">${st.gas_used} gas</span></div>` : ""}
+              ${st.fork_verified === true ? `<div class="plan-step-body fork-ok">✓ Passed on a fork${st.index === 0 ? "" : ` with the earlier step${st.index > 1 ? "s" : ""} applied`}${st.fork_gas_used ? ` (${st.fork_gas_used} gas)` : ""}</div>` : ""}
+              ${st.fork_verified === false ? `<div class="plan-step-body fork-bad">✗ Reverted on a fork: ${esc(st.fork_revert_reason)}</div>` : ""}
             </div>`;
         }).join("")}
       </div>`;
@@ -1008,6 +1184,8 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
 
       // A failed run may have retired a cached skill; the library should reflect it.
       if (data.demoted_skill) loadSkills();
+      // A revert may have been written onto a card, or a row marked failed.
+      loadCards();
     } catch (err) {
       closeLogStream();
       outputSection.innerHTML = `<div class="verdict verdict-rose"><h3>Request failed</h3><p>${esc(err.message)}</p></div>`;
@@ -1261,6 +1439,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
         ${renderTelemetryCards(resData.traces, resData)}`;
 
       loadSkills();
+      loadCards();
     } catch (err) {
       outputSection.innerHTML = `
         <div class="verdict verdict-rose">

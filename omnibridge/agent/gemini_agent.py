@@ -134,12 +134,20 @@ class GeminiDiscoveryAgent(DiscoveryProvider):
 
     # ------------------------------------------------------------------ tools
 
-    def _function_tools(self) -> List[Any]:
+    def _function_tools(self, toolkit: Any = None) -> List[Any]:
         from google.genai import types
 
+        client = [
+            types.FunctionDeclaration(
+                name=spec["name"],
+                description=spec["description"],
+                parameters_json_schema=_strip_unsupported(spec["input_schema"]),
+            )
+            for spec in (toolkit.schemas() if toolkit is not None else [])
+        ]
         return [
             types.Tool(
-                function_declarations=[
+                function_declarations=client + [
                     types.FunctionDeclaration(
                         name="propose_route",
                         description=PROPOSE_ROUTE_DESCRIPTION,
@@ -167,21 +175,22 @@ class GeminiDiscoveryAgent(DiscoveryProvider):
             ],
         )
 
-    def _decide_config(self) -> Any:
+    def _decide_config(self, toolkit: Any = None) -> Any:
         from google.genai import types
 
+        client_names = [spec["name"] for spec in toolkit.schemas()] if toolkit is not None else []
         return types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             max_output_tokens=self.max_tokens,
             thinking_config=types.ThinkingConfig(thinking_budget=self.thinking_budget),
-            tools=self._function_tools(),
+            tools=self._function_tools(toolkit),
             # ANY forces a call to one of the two terminal functions, so the model
             # cannot end the turn with prose where a decision belongs. Anthropic has no
             # equivalent; there the loop refuses an undecided turn instead.
             tool_config=types.ToolConfig(
                 function_calling_config=types.FunctionCallingConfig(
                     mode="ANY",
-                    allowed_function_names=["propose_route", "no_route_found"],
+                    allowed_function_names=client_names + ["propose_route", "no_route_found"],
                 )
             ),
         )
@@ -274,6 +283,57 @@ class GeminiDiscoveryAgent(DiscoveryProvider):
             )
         return response
 
+    # ------------------------------------------------------------------ decide
+
+    #: Decide turns that may be spent on client tools before a terminal answer.
+    MAX_TOOL_TURNS = 6
+
+    def _decide(self, prompt: str, budget: RequestBudget, log: StepLogger,
+                turns: List[Dict[str, Any]], toolkit: Any = None) -> List[Any]:
+        """
+        Call the model with function calling forced until it gives a terminal answer.
+
+        Without a toolkit this is one call, exactly as before. With one, a client-tool
+        call is executed and its result sent back, and the model decides again — bounded,
+        because mode=ANY forces *a* call every turn and a model that keeps checking
+        things must still be made to conclude.
+        """
+        contents: Any = prompt
+        if toolkit is not None:
+            from google.genai import types
+
+            contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+
+        for turn in range(self.MAX_TOOL_TURNS + 1):
+            with log.timed("decide call" if turn == 0 else f"decide call {turn + 1}"):
+                decision = self._generate(contents, self._decide_config(toolkit), budget, log)
+            calls = self._function_calls(decision)
+            turns.append({"phase": "decide", "function_calls": [c.name for c in calls]})
+            log.value("function called", ", ".join(c.name for c in calls) or "none")
+
+            client = [c for c in calls if toolkit is not None and toolkit.handles(c.name)]
+            terminal = [c for c in calls if c.name in ("propose_route", "no_route_found")]
+            if not client:
+                return calls
+
+            from google.genai import types
+
+            parts = []
+            for call in client:
+                result = toolkit.handle(call.name, dict(call.args or {}))
+                log.value(f"  {call.name}", "ok" if result.get("ok") else result.get("error")
+                          or "; ".join(result.get("reasons", [])), limit=200)
+                parts.append(types.Part.from_function_response(name=call.name, response=result))
+            if terminal:
+                return terminal
+            if turn == self.MAX_TOOL_TURNS:
+                break
+            contents.append(decision.candidates[0].content)
+            contents.append(types.Content(role="user", parts=parts))
+
+        log.fail(f"no terminal answer after {self.MAX_TOOL_TURNS} tool turns")
+        return []
+
     # ---------------------------------------------------------------- discover
 
     def discover(
@@ -284,11 +344,15 @@ class GeminiDiscoveryAgent(DiscoveryProvider):
         budget: RequestBudget,
         failure_context: Optional[str] = None,
         trace: Optional[Dict[str, Any]] = None,
+        cards_context: Optional[str] = None,
+        tools: Optional[Any] = None,
     ) -> RouteProposal:
         """Research with grounding, then force a structured terminal answer."""
         budget.start_attempt()
         log = StepLogger("gemini")
-        question = self.build_question(intent, source_chain, dest_chain_name, failure_context)
+        question = self.build_question(
+            intent, source_chain, dest_chain_name, failure_context, cards_context
+        )
         turns: List[Dict[str, Any]] = []
 
         log.step(f"model [bold]{self.model}[/bold], attempt {budget.attempts}/{budget.max_attempts}")
@@ -330,11 +394,7 @@ class GeminiDiscoveryAgent(DiscoveryProvider):
         decide_prompt = (
             f"{question}\n\nYour research found:\n\n{findings}\n{DECIDE_SUFFIX}"
         )
-        with log.timed("decide call"):
-            decision = self._generate(decide_prompt, self._decide_config(), budget, log)
-        calls = self._function_calls(decision)
-        turns.append({"phase": "decide", "function_calls": [c.name for c in calls]})
-        log.value("function called", ", ".join(c.name for c in calls) or "none")
+        calls = self._decide(decide_prompt, budget, log, turns, tools)
 
         if not calls:
             log.fail("no terminal function call despite mode=ANY")
