@@ -14,14 +14,11 @@ errors into the cache:
     simulation gate and the human gate is still reversible.
 """
 
-import os
-from datetime import datetime, timezone
 from pathlib import Path
-import re
-import shutil
 from typing import Any, Dict, List, Optional
-import yaml
 from pydantic import BaseModel, Field, field_validator
+
+from omnibridge.memory.store import VersionedStore, utc_stamp, utc_today
 
 
 # The repository the running system reads and writes. It sits at the project root
@@ -30,12 +27,9 @@ from pydantic import BaseModel, Field, field_validator
 LOCAL_SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
 
 
-def _utc_today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-def _utc_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+# Kept under their old names for anything that imported them from here.
+_utc_today = utc_today
+_utc_stamp = utc_stamp
 
 
 def _norm(value: Optional[str]) -> str:
@@ -145,8 +139,10 @@ class Skill(BaseModel):
     file_path: Optional[str] = None
 
 
-class SkillManager:
+class SkillManager(VersionedStore):
     """Manages discovery, loading, verification, and persistence of SKILL.md modules."""
+
+    document_name = "SKILL.md"
 
     def __init__(self, repository_path: Optional[str] = None):
         # An explicit repository means *only* that repository. Without this, a manager
@@ -166,18 +162,15 @@ class SkillManager:
     def _parse_skill_file(self, file_path: Path) -> Optional[Skill]:
         """Parses a SKILL.md file with YAML frontmatter."""
         try:
-            raw_text = file_path.read_text(encoding="utf-8")
-            pattern = r"^---\s*\n(.*?)\n---\s*\n(.*)$"
-            match = re.search(pattern, raw_text, re.DOTALL)
-            if not match:
+            parsed = self.parse_document(file_path)
+            if parsed is None:
                 return None
-
-            data = yaml.safe_load(match.group(1))
-            if not data or "name" not in data:
+            data, body = parsed
+            if "name" not in data:
                 return None
 
             metadata = SkillMetadata(**data)
-            return Skill(metadata=metadata, content=match.group(2), file_path=str(file_path))
+            return Skill(metadata=metadata, content=body, file_path=str(file_path))
         except Exception as e:
             print(f"[SkillManager] Warning: failed to parse {file_path}: {e}")
             return None
@@ -192,18 +185,12 @@ class SkillManager:
         ]
         seen_names = set()
 
-        for sdir in search_dirs:
-            if not sdir.exists():
-                continue
-            for root, dirs, files in os.walk(sdir):
-                # Retained revisions are history, not candidates.
-                dirs[:] = [d for d in dirs if d != "revisions"]
-                for file in files:
-                    if file.lower() == "skill.md":
-                        parsed = self._parse_skill_file(Path(root) / file)
-                        if parsed and parsed.metadata.name not in seen_names:
-                            seen_names.add(parsed.metadata.name)
-                            skills.append(parsed)
+        # Retained revisions are history, not candidates; iter_documents skips them.
+        for path in self.iter_documents(search_dirs):
+            parsed = self._parse_skill_file(path)
+            if parsed and parsed.metadata.name not in seen_names:
+                seen_names.add(parsed.metadata.name)
+                skills.append(parsed)
         return skills
 
     def find_skill(
@@ -236,25 +223,13 @@ class SkillManager:
     def _skill_dir(self, name: str, target_dir: Optional[str] = None) -> Path:
         return Path(target_dir) if target_dir else self.repo_dir / name
 
-    @staticmethod
-    def _render(metadata: SkillMetadata, markdown_body: str) -> str:
-        header = yaml.dump(metadata.model_dump(exclude_none=True), sort_keys=False)
-        return f"---\n{header}---\n\n{markdown_body.strip()}\n"
+    @classmethod
+    def _render(cls, metadata: SkillMetadata, markdown_body: str) -> str:
+        return cls.render_document(metadata.model_dump(exclude_none=True), markdown_body)
 
     def _retain_revision(self, file_path: Path) -> Optional[str]:
-        """
-        Copy the current SKILL.md aside before it is replaced.
-
-        Human approval is a good filter, not an infallible one, so every overwrite
-        stays reversible without depending on the repository being under git.
-        """
-        if not file_path.exists():
-            return None
-        revisions_dir = file_path.parent / "revisions"
-        revisions_dir.mkdir(parents=True, exist_ok=True)
-        archived = revisions_dir / f"SKILL.{_utc_stamp()}.md"
-        shutil.copy2(file_path, archived)
-        return str(archived.relative_to(file_path.parent))
+        """Copy the current SKILL.md aside before it is replaced. See VersionedStore."""
+        return self.retain_revision(file_path)
 
     def save_skill(
         self,
@@ -272,21 +247,22 @@ class SkillManager:
         dest_dir.mkdir(parents=True, exist_ok=True)
         file_path = dest_dir / "SKILL.md"
 
-        existing = self._parse_skill_file(file_path) if file_path.exists() else None
-        archived = self._retain_revision(file_path)
+        with self.locked(file_path):
+            existing = self._parse_skill_file(file_path) if file_path.exists() else None
+            archived = self._retain_revision(file_path)
 
-        if existing is not None:
-            metadata.revisions = list(existing.metadata.revisions)
-            metadata.verification_count = max(
-                metadata.verification_count, existing.metadata.verification_count
-            )
-        if archived:
-            metadata.revisions = [*metadata.revisions, archived]
-        if metadata.verified:
-            metadata.verification_count += 1
-            metadata.last_verified = metadata.last_verified or _utc_today()
+            if existing is not None:
+                metadata.revisions = list(existing.metadata.revisions)
+                metadata.verification_count = max(
+                    metadata.verification_count, existing.metadata.verification_count
+                )
+            if archived:
+                metadata.revisions = [*metadata.revisions, archived]
+            if metadata.verified:
+                metadata.verification_count += 1
+                metadata.last_verified = metadata.last_verified or _utc_today()
 
-        file_path.write_text(self._render(metadata, markdown_body), encoding="utf-8")
+            self.write_atomic(file_path, self._render(metadata, markdown_body))
         return str(file_path)
 
     def mark_unverified(self, skill: Skill, reason: str) -> str:
@@ -308,5 +284,11 @@ class SkillManager:
         metadata.last_failure_at = _utc_today()
 
         path = Path(skill.file_path)
-        path.write_text(self._render(metadata, skill.content), encoding="utf-8")
+        with self.locked(path):
+            # A demotion is a write like any other, so it keeps what it replaced. It
+            # used to rewrite in place, which left no record of the verified version.
+            archived = self._retain_revision(path)
+            if archived:
+                metadata.revisions = [*metadata.revisions, archived]
+            self.write_atomic(path, self._render(metadata, skill.content))
         return str(path)

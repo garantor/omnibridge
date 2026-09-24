@@ -13,6 +13,7 @@ from web3 import Web3
 
 from omnibridge.agent.discovery_agent import RouteProposal
 from omnibridge.agent.provenance import ProvenanceReport, selector_for, verify_proposal
+from omnibridge.core import abi_signature
 from omnibridge.core.executor import CalldataExecutor
 from omnibridge.core.models import RouteQuote, UserIntent
 
@@ -30,11 +31,14 @@ def _check_shape(proposal: RouteProposal, source_chain_id: int) -> List[str]:
     problems: List[str] = []
 
     signature = proposal.function_signature.strip()
-    if "(" not in signature or not signature.endswith(")"):
-        problems.append(f"Function signature {signature!r} is not a canonical ABI signature.")
+    try:
+        # Tuple-aware, and refuses aliases like `uint` whose selector is not the
+        # deployed one. Splitting on commas broke on every struct argument.
+        declared = abi_signature.parse(signature).types
+    except abi_signature.SignatureError as exc:
+        problems.append(f"Function signature {signature!r} is not a canonical ABI signature: {exc}")
         return problems
 
-    declared = [t.strip() for t in signature[signature.index("(") + 1 : -1].split(",") if t.strip()]
     if declared != [t.strip() for t in proposal.param_types]:
         problems.append(
             f"param_types {proposal.param_types} do not match the types in the signature "

@@ -8,3 +8,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Lock and temp files from the skill and card stores.
+.*.lock
+.*.tmp

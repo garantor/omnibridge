@@ -55,6 +55,10 @@ class Simulator:
         """The preferred endpoint, kept for callers that only want one URL."""
         return self.rpc_urls[0] if self.rpc_urls else ""
 
+    def connect_verified(self) -> Tuple[Optional[Web3], Optional[str]]:
+        """Public form of `_connect_verified`, for callers that only need the node."""
+        return self._connect_verified()
+
     def _connect_verified(self) -> Tuple[Optional[Web3], Optional[str]]:
         """
         Return the first endpoint that is reachable *and* reports the chain we expect.

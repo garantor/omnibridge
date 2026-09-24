@@ -78,6 +78,81 @@ def handle_rpc_bench(args):
     console.print(f"[bold green]✓ Fastest RPC endpoint:[/bold green] {fastest}")
 
 
+def handle_cards_list(args):
+    """Lists protocol cards and how far each entry has been established."""
+    from omnibridge.cards.manager import CardManager
+
+    table = Table(title="[bold green]Omnibridge Protocol Cards[/bold green]")
+    table.add_column("Card", style="cyan")
+    table.add_column("Kind", style="white")
+    table.add_column("Version", style="white")
+    table.add_column("Verified", style="green")
+    table.add_column("Checked", style="yellow")
+    table.add_column("Lead", style="white")
+    table.add_column("Demoted", style="red")
+    table.add_column("Path", style="dim")
+
+    for doc in CardManager().list_cards():
+        counts = {"verified": 0, "checked": 0, "lead": 0, "demoted": 0}
+        for status in doc.card.statuses().values():
+            counts[status] += 1
+        table.add_row(
+            doc.card.id,
+            doc.card.kind + ("" if doc.card.executable else " (not executable)"),
+            str(doc.card.card_version),
+            *(str(counts[k]) for k in ("verified", "checked", "lead", "demoted")),
+            doc.file_path or "",
+        )
+    console.print(table)
+
+
+def handle_cards_check(args):
+    """
+    Run the on-chain checks over a card and show what they would change.
+
+    Read-only unless --write is given, and even then it only raises passing leads to
+    `checked` and records token decimals read from the chain. It never verifies or
+    demotes anything: only a run outcome does that.
+    """
+    from omnibridge.cards.manager import CardManager
+    from omnibridge.cards.validation import apply_checks, check_card
+    from omnibridge.memory.store import utc_today
+
+    mgr = CardManager()
+    doc = mgr.load(args.protocol_id)
+    if doc is None:
+        console.print(f"[red]No readable card '{args.protocol_id}'.[/red]")
+        sys.exit(1)
+
+    results = check_card(doc.card)
+    table = Table(title=f"[bold cyan]Checks for {doc.card.id} (v{doc.card.card_version})[/bold cyan]")
+    table.add_column("Entry", style="cyan")
+    table.add_column("Status", style="white")
+    table.add_column("Result", style="white")
+    table.add_column("Reasons", style="dim")
+    for r in results:
+        change = f"{r.current.value} -> {r.proposed.value}" if r.changes_status else r.current.value
+        verdict = "[green]pass[/green]" if r.passed else "[red]fail[/red]"
+        table.add_row(f"{r.kind}:{r.entry_id}", change, verdict, "; ".join(r.reasons))
+    console.print(table)
+    console.print(
+        "[dim]Destinations and parameters have no on-chain check and stay leads until a "
+        "broadcast uses them.[/dim]"
+    )
+
+    promotions = [r for r in results if r.changes_status]
+    if not args.write:
+        if promotions:
+            console.print(f"{len(promotions)} lead(s) would become checked. Re-run with --write to record it.")
+        return
+    if not promotions and not any(r.kind == "tokens" and r.passed for r in results):
+        console.print("Nothing to write.")
+        return
+    updated = apply_checks(doc.card, results, utc_today())
+    path = mgr.save_card(updated, cause=f"cards check: {len(promotions)} lead(s) passed on-chain checks")
+    console.print(f"[green]Wrote {path}[/green]")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Omnibridge: Autonomous In-Transit Cross-Chain Agent")
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
@@ -103,6 +178,17 @@ def main(argv=None):
     rpc_parser = subparsers.add_parser("rpc-bench", help="Benchmark and race public RPC endpoints")
     rpc_parser.add_argument("chain", help="Chain name to test (e.g. base, arbitrum, ethereum)")
 
+    # Protocol cards
+    cards_parser = subparsers.add_parser("cards", help="Inspect and check protocol cards")
+    cards_sub = cards_parser.add_subparsers(dest="cards_command")
+    cards_sub.add_parser("list", help="List protocol cards")
+    check_parser = cards_sub.add_parser("check", help="Run on-chain checks over a card's entries")
+    check_parser.add_argument("protocol_id", help="Card id, e.g. cctp")
+    check_parser.add_argument(
+        "--write", action="store_true",
+        help="Record passing leads as checked (never verifies or demotes)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "bridge":
@@ -111,6 +197,10 @@ def main(argv=None):
         handle_list_skills(args)
     elif args.command == "rpc-bench":
         handle_rpc_bench(args)
+    elif args.command == "cards" and args.cards_command == "list":
+        handle_cards_list(args)
+    elif args.command == "cards" and args.cards_command == "check":
+        handle_cards_check(args)
     else:
         parser.print_help()
 

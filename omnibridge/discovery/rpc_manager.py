@@ -142,6 +142,31 @@ class RPCManager:
         self.dynamic_chains[info.name.lower()] = info
         return info
 
+    def discover_chain_by_id(self, chain_id: int) -> ChainInfo:
+        """
+        Metadata for an EIP-155 chain id, from the same registry.
+
+        An id is unambiguous where a name is not, so none of the name guards apply. Used
+        where the id is already known and trusted to be the question, e.g. checking a
+        card entry that names the chain it is deployed on.
+        """
+        cache_key = f"id:{int(chain_id)}"
+        if cache_key in self.dynamic_chains:
+            return self.dynamic_chains[cache_key]
+        try:
+            chains = self._fetch_registry()
+        except Exception as exc:
+            raise UnresolvedChainError(
+                f"Chain registry at {CHAIN_REGISTRY_URL} is unreachable ({exc}); "
+                f"cannot resolve chain id {chain_id}."
+            ) from exc
+        entry = next((c for c in chains if int(c.get("chainId", -1)) == int(chain_id)), None)
+        if entry is None:
+            raise UnresolvedChainError(f"The chain registry has no chain with id {chain_id}.")
+        info = self._to_chain_info(entry)
+        self.dynamic_chains[cache_key] = info
+        return info
+
     def _match_registry_entry(
         self, key: str, chains: List[Dict[str, Any]], network: str
     ) -> Dict[str, Any]:
