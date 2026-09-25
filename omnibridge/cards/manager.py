@@ -69,6 +69,21 @@ class CardManager(VersionedStore):
         path = self.card_path(protocol_id)
         return self._parse(path) if path.exists() else None
 
+    def superseded_by(self, card: Card, cards: Optional[List[CardDocument]] = None) -> Optional[Card]:
+        """
+        The newest card of the same family on the same network, if it is newer than this.
+
+        "Always use the latest version": a superseded card is never offered to the
+        agent, never routed through, and never extended.
+        """
+        pool = cards if cards is not None else self.list_cards()
+        newer = [
+            d.card for d in pool
+            if d.card.family == card.family and d.card.network == card.network
+            and d.card.version_number > card.version_number
+        ]
+        return max(newer, key=lambda c: c.version_number) if newer else None
+
     def resolve_protocol(self, name: str) -> Optional[str]:
         """
         A card id for this name, matched exactly on id or protocol name. No substrings.

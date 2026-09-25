@@ -301,3 +301,104 @@ def test_a_revert_on_a_card_route_is_written_to_the_card_and_fed_back(monkeypatc
     })
     assert "Use domain `6`." in out["failure_context"]
     assert mgr.load("cctp").card.failure_mode("No TokenMessenger for domain").seen == 2
+
+
+# ---------------------------------------------- found in the first live testnet run
+
+def test_every_card_update_field_is_declared_so_gemini_can_fill_it():
+    """
+    `patch_data` was a bare object. Gemini fills only declared fields, so it sent `{}`
+    seven times in a row and never concluded.
+    """
+    from omnibridge.agent.gemini_agent import _strip_unsupported
+    from omnibridge.agent.tools import SCHEMAS
+
+    patch = _strip_unsupported(SCHEMAS["propose_card_update"]["input_schema"])["properties"]["patch_data"]
+    assert patch["properties"]["kind"]["enum"] == ["chain_row", "interface", "failure_fix", "new_card"]
+    assert patch["required"] == ["kind"]
+    item = patch["properties"]["addresses"]["items"]
+    assert set(item["properties"]) == {"column", "address"}
+
+
+def test_the_list_form_of_a_chain_row_is_accepted():
+    from tests.test_card_lifecycle import _seed
+
+    mgr = CardManager(repository_path=tempfile.mkdtemp())
+    _seed(mgr)
+    kit = _toolkit(cards=mgr, nodes={130: router_w3()})
+    result = kit.handle("propose_card_update", {
+        "protocol_id": "cctp", "sources": [DOCS], "reason": "r",
+        "patch_data": {"kind": "chain_row", "chain_name": "Unichain", "chain_id": 130, "dest_id": "10",
+                       "addresses": [{"column": "Token Messenger",
+                                      "address": "0x2B4069517957735bE00ceE0fadAE88a26365528f"}]}})
+    assert result["ok"], result
+    assert mgr.load("cctp").card.row(130).network == "Unichain"
+
+
+def test_a_call_that_already_failed_is_not_run_again():
+    kit = _toolkit()
+    bad = {"protocol_id": "cctp", "patch_data": {}, "sources": [], "reason": "r"}
+    first = kit.handle("propose_card_update", bad)
+    second = kit.handle("propose_card_update", bad)
+    assert not first["ok"] and "Unknown patch kind" in first["reasons"][0]
+    assert not second["ok"] and "already made exactly this call" in second["error"]
+    assert kit.summary()["by_tool"] == {"propose_card_update": 1}, "the repeat was not executed"
+
+
+def test_gemini_is_made_to_conclude_on_its_last_turn():
+    from omnibridge.agent.gemini_agent import GeminiDiscoveryAgent
+    from tests import test_gemini_agent as g
+
+    stuck = g._response([g._part(call=g._call("encode_jit_payload", {"abi_signature": SIG, "parameters": []}))])
+    final = g._response([g._part(call=g._call("propose_route", g.VALID_ARGS))])
+    turns = GeminiDiscoveryAgent.MAX_TOOL_TURNS
+    agent = g._agent([g.RESEARCH] + [stuck] * turns + [final])
+    proposal = agent.discover(g.INTENT, g.BASE, "arbitrum", RequestBudget(max_model_calls=20), tools=_toolkit())
+    assert proposal.protocol == "CCTP"
+    last = agent.client.configs[-1].tool_config.function_calling_config.allowed_function_names
+    assert last == ["propose_route", "no_route_found"]
+
+
+def test_gemini_sends_back_a_no_route_that_cites_nothing():
+    """Observed live: no_route_found("testing tool availability") with no sources ended a run."""
+    from tests import test_gemini_agent as g
+
+    probe = g._response([g._part(call=g._call("no_route_found", {"reason": "testing tool availability", "sources": []}))])
+    final = g._response([g._part(call=g._call("propose_route", g.VALID_ARGS))])
+    agent = g._agent([g.RESEARCH, probe, final])
+    proposal = agent.discover(g.INTENT, g.BASE, "arbitrum", RequestBudget(), tools=_toolkit())
+    assert proposal.protocol == "CCTP"
+
+
+def test_gemini_accepts_a_bare_no_route_on_its_last_turn():
+    from omnibridge.agent.contract import NoRouteFound
+    from omnibridge.agent.gemini_agent import GeminiDiscoveryAgent
+    from tests import test_gemini_agent as g
+
+    bare = g._response([g._part(call=g._call("no_route_found", {"reason": "none", "sources": []}))])
+    agent = g._agent([g.RESEARCH] + [bare] * (GeminiDiscoveryAgent.MAX_TOOL_TURNS + 1))
+    with pytest.raises(NoRouteFound):
+        agent.discover(g.INTENT, g.BASE, "arbitrum", RequestBudget(max_model_calls=20), tools=_toolkit())
+
+
+def test_a_sourced_no_route_is_an_answer_immediately():
+    from omnibridge.agent.contract import NoRouteFound
+    from tests import test_gemini_agent as g
+
+    sourced = g._response([g._part(call=g._call("no_route_found", {
+        "reason": "CCTP does not support this chain", "sources": ["https://developers.circle.com/cctp"]}))])
+    with pytest.raises(NoRouteFound):
+        g._agent([g.RESEARCH, sourced]).discover(g.INTENT, g.BASE, "arbitrum", RequestBudget(), tools=_toolkit())
+
+
+def test_the_anthropic_loop_sends_back_a_no_route_that_cites_nothing():
+    probe = _Block("tool_use", "no_route_found", {"reason": "testing", "sources": []})
+    probe.id = "tu_9"
+    client = FakeClient([
+        _Response([probe]),
+        _Response([_Block("tool_use", "propose_route", _proposal_payload())]),
+    ])
+    proposal = DiscoveryAgent(client=client).discover(INTENT, BASE_CHAIN, "Arbitrum", RequestBudget(), tools=_toolkit())
+    assert proposal.protocol == "CCTP"
+    sent_back = client.last_kwargs["messages"][-1]["content"][0]
+    assert sent_back["tool_use_id"] == "tu_9" and sent_back["is_error"]

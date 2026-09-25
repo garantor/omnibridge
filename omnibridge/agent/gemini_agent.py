@@ -175,15 +175,19 @@ class GeminiDiscoveryAgent(DiscoveryProvider):
             ],
         )
 
-    def _decide_config(self, toolkit: Any = None) -> Any:
+    def _decide_config(self, toolkit: Any = None, final: bool = False) -> Any:
         from google.genai import types
 
-        client_names = [spec["name"] for spec in toolkit.schemas()] if toolkit is not None else []
+        # On the last allowed turn only the terminal answers remain: mode=ANY forces a
+        # call every turn, so without this a model can spend every turn on tools and
+        # never decide — observed, repeating one failing card update to the end.
+        client_names = ([spec["name"] for spec in toolkit.schemas()]
+                        if toolkit is not None and not final else [])
         return types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             max_output_tokens=self.max_tokens,
             thinking_config=types.ThinkingConfig(thinking_budget=self.thinking_budget),
-            tools=self._function_tools(toolkit),
+            tools=self._function_tools(toolkit if not final else None),
             # ANY forces a call to one of the two terminal functions, so the model
             # cannot end the turn with prose where a decision belongs. Anthropic has no
             # equivalent; there the loop refuses an undecided turn instead.
@@ -305,20 +309,37 @@ class GeminiDiscoveryAgent(DiscoveryProvider):
             contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
 
         for turn in range(self.MAX_TOOL_TURNS + 1):
+            final = toolkit is not None and turn == self.MAX_TOOL_TURNS
+            if final:
+                log.warn("last decide turn: only propose_route or no_route_found are allowed")
             with log.timed("decide call" if turn == 0 else f"decide call {turn + 1}"):
-                decision = self._generate(contents, self._decide_config(toolkit), budget, log)
+                decision = self._generate(contents, self._decide_config(toolkit, final), budget, log)
             calls = self._function_calls(decision)
             turns.append({"phase": "decide", "function_calls": [c.name for c in calls]})
             log.value("function called", ", ".join(c.name for c in calls) or "none")
 
             client = [c for c in calls if toolkit is not None and toolkit.handles(c.name)]
             terminal = [c for c in calls if c.name in ("propose_route", "no_route_found")]
-            if not client:
+
+            from omnibridge.agent.contract import unsupported_no_route
+
+            premature = None
+            if toolkit is not None and not final:
+                premature = next((c for c in terminal if c.name == "no_route_found"
+                                  and unsupported_no_route(dict(c.args or {}))), None)
+            if premature is not None:
+                why = unsupported_no_route(dict(premature.args or {}))
+                log.warn(f"no_route_found without sources sent back: {why[:90]}")
+                terminal = [c for c in terminal if c is not premature]
+            if not client and premature is None:
                 return calls
 
             from google.genai import types
 
             parts = []
+            if premature is not None:
+                parts.append(types.Part.from_function_response(
+                    name="no_route_found", response={"ok": False, "error": why}))
             for call in client:
                 result = toolkit.handle(call.name, dict(call.args or {}))
                 log.value(f"  {call.name}", "ok" if result.get("ok") else result.get("error")

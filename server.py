@@ -5,7 +5,7 @@ Manages /api/bridge/start and /api/bridge/resume using native LangGraph state ch
 
 import time
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from langgraph.types import Command
@@ -62,6 +62,9 @@ class StartBridgeRequest(BaseModel):
         example="0x0000000000000000000000000000000000000000",
     )
     slippage: Optional[str] = Field(default="0.5%")
+    #: Which network family every chain in this run is resolved on. Chain resolution
+    #: refuses to cross it, so a testnet request can never resolve to a mainnet chain.
+    network: Literal["mainnet", "testnet"] = Field(default="mainnet")
 
 
 class PreflightRequest(BaseModel):
@@ -79,6 +82,7 @@ class PreflightRequest(BaseModel):
     #: wallet that cannot pay gas; with them the sending asset is checked too.
     asset: Optional[str] = Field(default=None, example="USDC")
     amount: Optional[float] = Field(default=None, example=100.0)
+    network: Literal["mainnet", "testnet"] = Field(default="mainnet")
 
 
 class ResumeBridgeRequest(BaseModel):
@@ -246,6 +250,7 @@ def start_bridge_flow(req: StartBridgeRequest):
         "user_address": req.userAddress,
         "recipient": (req.recipient or "").strip() or None,
         "slippage": req.slippage,
+        "network": req.network,
         "traces": {},
         "retry_count": 0,
     }
@@ -415,7 +420,7 @@ def advance_plan_step(req: AdvanceStepRequest):
 
     plan.steps[req.step_index].tx_hash = req.tx_hash
 
-    src = rpc_mgr.discover_chain_metadata(values["source_chain"])
+    src = rpc_mgr.discover_chain_metadata(values["source_chain"], network=values.get("network") or "mainnet")
     rpc = values.get("active_rpc") or ""
     candidates = [rpc] + [u for u in src.rpc_urls if u != rpc]
     simulator = Simulator(candidates, expected_chain_id=src.chain_id)
@@ -518,12 +523,12 @@ def preflight_funding(req: PreflightRequest):
         )
 
     try:
-        chain = rpc_mgr.discover_chain_metadata(req.sourceChain)
+        chain = rpc_mgr.discover_chain_metadata(req.sourceChain, network=req.network)
     except ChainResolutionError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
     try:
-        rpc_url = rpc_mgr.get_fastest_rpc_sync(req.sourceChain)
+        rpc_url = rpc_mgr.get_fastest_rpc_sync(req.sourceChain, network=req.network)
     except Exception:
         rpc_url = None
 
@@ -590,11 +595,17 @@ def list_cards():
     the same reason it is absent from discovery.
     """
     out = []
-    for doc in card_mgr.list_cards():
+    docs = card_mgr.list_cards()
+    for doc in docs:
         card = doc.card
+        newer = card_mgr.superseded_by(card, docs)
         out.append({
             "protocol_id": card.protocol_id,
             "protocol_name": card.protocol_name,
+            "network": card.network,
+            "protocol_family": card.family,
+            "protocol_version": card.protocol_version,
+            "superseded_by": newer.protocol_id if newer else None,
             "card_version": card.card_version,
             "last_updated": card.last_updated,
             "docs": list(card.docs),

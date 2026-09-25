@@ -45,7 +45,7 @@ FAILURE_MODES = "Learned Failure Modes & Revert Fixes"
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 _FRONT_KEYS = {
     "protocol_id", "protocol_name", "docs", "supported_chains", "supported_tokens",
-    "card_version", "last_updated",
+    "network", "protocol_family", "protocol_version", "card_version", "last_updated",
 }
 _INTERFACE = re.compile(
     r"^- \*\*(?P<label>[^*:]+):\*\* `(?P<sig>[^`]+)`(?: on (?P<target>[A-Za-z0-9 ]+))?$"
@@ -241,9 +241,13 @@ def render(card: Card) -> str:
         "docs": list(card.docs),
         "supported_chains": list(card.supported_chains),
         "supported_tokens": list(card.supported_tokens),
+        "network": card.network,
+        "protocol_family": card.protocol_family,
+        "protocol_version": card.protocol_version,
         "card_version": card.card_version,
         "last_updated": card.last_updated,
     }
+    front = {k: v for k, v in front.items() if v is not None}
     out = ["---", yaml.dump(front, sort_keys=False).rstrip(), "---", ""]
     out += [f"# Protocol Knowledge: {card.protocol_name}", ""]
 

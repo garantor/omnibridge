@@ -66,6 +66,25 @@ document.addEventListener("DOMContentLoaded", () => {
   const connectWalletBtn = document.getElementById("connect-wallet-btn");
   const walletBtnText = document.getElementById("wallet-btn-text");
   const chips = document.querySelectorAll(".chip");
+  const networkNote = document.getElementById("network-note");
+
+  function selectedNetwork() {
+    const checked = document.querySelector('input[name="network"]:checked');
+    return checked ? checked.value : "mainnet";
+  }
+
+  function setNetwork(value) {
+    const radio = document.querySelector(`input[name="network"][value="${value}"]`);
+    if (radio) radio.checked = true;
+    networkNote.classList.toggle("hidden", value !== "testnet");
+  }
+
+  document.querySelectorAll('input[name="network"]').forEach((radio) => {
+    radio.addEventListener("change", () => {
+      setNetwork(selectedNetwork());
+      checkFunding();
+    });
+  });
   const logSection = document.getElementById("log-section");
   const logStream = document.getElementById("log-stream");
   const logAutoscroll = document.getElementById("log-autoscroll");
@@ -112,7 +131,8 @@ document.addEventListener("DOMContentLoaded", () => {
   /** The chain the transfer would leave from: what the intent says, else the wallet's. */
   function intendedSourceChain() {
     const typed = (intentInput.value || "").match(/\bfrom\s+([a-zA-Z0-9_-]+)\s+to\s+/i);
-    if (typed) return typed[1];
+    // Same normalisation the server applies: "arbitrum-sepolia" is "arbitrum sepolia".
+    if (typed) return typed[1].replace(/[-_]+/g, " ").trim();
     const wallets = onboard.state.get().wallets;
     const hexId = wallets && wallets[0] && wallets[0].chains && wallets[0].chains[0]
       ? wallets[0].chains[0].id
@@ -167,6 +187,7 @@ document.addEventListener("DOMContentLoaded", () => {
           sourceChain,
           asset: assetFromIntent(),
           amount: amountFromIntent(),
+          network: selectedNetwork(),
         }),
       });
       if (!res.ok) {
@@ -265,6 +286,9 @@ document.addEventListener("DOMContentLoaded", () => {
   chips.forEach((chip) => {
     chip.addEventListener("click", () => {
       intentInput.value = chip.getAttribute("data-intent");
+      // A testnet suggestion switches the network with it; any other goes back to
+      // mainnet, so a chip can never send a mainnet sentence down a testnet run.
+      setNetwork(chip.getAttribute("data-network") || "mainnet");
       intentInput.focus();
       // The chain and asset just changed, so the banner is about the wrong transfer.
       checkFunding();
@@ -362,13 +386,18 @@ document.addEventListener("DOMContentLoaded", () => {
         return `
           <div class="protocol-card">
             <div class="skill-name">
-              <span>📘 ${esc(c.protocol_name)}</span>
-              <span class="muted">v${esc(c.card_version)} · ${esc(c.last_updated) || "—"}</span>
+              <span>📘 ${esc(c.protocol_name)}
+                ${c.protocol_version ? `<span class="skill-badge ${c.superseded_by ? "bad" : "ok"}">${esc(c.protocol_version)}${c.superseded_by ? " · superseded" : " · latest"}</span>` : ""}
+                <span class="skill-badge ${c.network === "testnet" ? "testnet" : "pending"}">${esc(c.network)}</span>
+              </span>
+              <span class="muted">rev ${esc(c.card_version)} · ${esc(c.last_updated) || "—"}</span>
             </div>
+            ${c.superseded_by ? `<div class="skill-failure">Superseded by <code>${esc(c.superseded_by)}</code>. Never offered to the agent or routed through: the latest version is always used.</div>` : ""}
+            ${c.rows.length === 0 ? `<div class="skill-desc">No chains recorded yet. The agent finds this version's deployments in the docs, checks them, and proposes each row.</div>` : ""}
             <div class="skill-desc">
               ${c.interfaces.map((i) => `<code>${esc(i.signature)}</code>`).join("<br>")}
             </div>
-            <div class="table-scroll">
+            <div class="table-scroll${c.rows.length ? "" : " hidden"}">
               <table class="chain-cache">
                 <thead><tr>
                   <th>Network</th><th>Chain</th>
@@ -547,9 +576,79 @@ document.addEventListener("DOMContentLoaded", () => {
     return `${m}m ${String(r).padStart(2, "0")}s`;
   }
 
+  // Chain details the server resolved for this run's source chain, from the chain
+  // registry. Lets the page name a chain it has no built-in label for — any testnet.
+  let currentSourceChainMeta = null;
+
   function chainLabel(chainId) {
     const id = Number(chainId);
+    if (currentSourceChainMeta && Number(currentSourceChainMeta.chain_id) === id) {
+      return currentSourceChainMeta.name;
+    }
     return CHAIN_LABELS[id] || (id ? `chain ${id}` : "an unknown network");
+  }
+
+  // Put the wallet on the route's chain with the wallet's own EIP-1193 methods. Onboard's
+  // setChain only knows the chains it was configured with, so every testnet failed to
+  // switch. A chain the wallet has never seen is added first (error 4902), using the
+  // registry's details and the RPC this run identity-checked; the wallet asks the user
+  // to approve both. Returns an error message, or null when the request went through.
+  async function switchWalletChain(wallet, chainHex) {
+    const provider = wallet && wallet.provider;
+    if (!provider) return "no wallet provider";
+    try {
+      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: chainHex }] });
+      return null;
+    } catch (err) {
+      const unknownChain = err && (err.code === 4902 || (err.data && err.data.originalError && err.data.originalError.code === 4902));
+      if (!unknownChain) return (err && err.message) || "the switch was declined";
+    }
+    const meta = currentSourceChainMeta;
+    if (!meta || !meta.rpc_url) return "the wallet does not know this chain, and no RPC is available to add it";
+    try {
+      await provider.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId: chainHex,
+          chainName: meta.name,
+          nativeCurrency: { name: meta.native_symbol || "ETH", symbol: meta.native_symbol || "ETH", decimals: 18 },
+          rpcUrls: [meta.rpc_url],
+          blockExplorerUrls: meta.explorer ? [meta.explorer] : undefined,
+        }],
+      });
+      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: chainHex }] });
+      return null;
+    } catch (err) {
+      return (err && err.message) || "adding the chain was declined";
+    }
+  }
+
+  // ---------------------------------------------------------------- run timer
+
+  const runTimer = document.getElementById("run-timer");
+  let runTimerHandle = null;
+  let lastRunDuration = null;
+  let runTimerStarted = 0;
+
+  function startRunTimer(label) {
+    stopRunTimer();
+    runTimerStarted = performance.now();
+    runTimer.classList.remove("hidden", "run-timer-done");
+    const tick = () => {
+      runTimer.textContent = `⏱ ${label} ${formatDuration((performance.now() - runTimerStarted) / 1000)}`;
+    };
+    tick();
+    runTimerHandle = setInterval(tick, 200);
+  }
+
+  function stopRunTimer(finalText) {
+    if (runTimerHandle) clearInterval(runTimerHandle);
+    runTimerHandle = null;
+    if (finalText) {
+      runTimer.textContent = finalText;
+      runTimer.classList.remove("hidden");
+      runTimer.classList.add("run-timer-done");
+    }
   }
 
   function explorerTxUrl(chainId, txHash) {
@@ -558,7 +657,12 @@ document.addEventListener("DOMContentLoaded", () => {
     const byChain = { 1: "https://etherscan.io", 10: "https://optimistic.etherscan.io",
                       137: "https://polygonscan.com", 8453: "https://basescan.org",
                       42161: "https://arbiscan.io" };
-    const base = byChain[Number(chainId)];
+    let base = byChain[Number(chainId)];
+    // The registry's explorer for exactly this chain id — right by construction, unlike
+    // a guessed one.
+    if (!base && currentSourceChainMeta && Number(currentSourceChainMeta.chain_id) === Number(chainId)) {
+      base = (currentSourceChainMeta.explorer || "").replace(/\/+$/, "") || null;
+    }
     return base ? `${base}/tx/${txHash}` : null;
   }
 
@@ -807,27 +911,33 @@ document.addEventListener("DOMContentLoaded", () => {
         <h3>Agent not configured</h3>
         <p>${esc(data.error)}</p>
         <p class="subtitle">
-          This is a credentials problem, not a routing one — the request reached
-          Anthropic and was refused. An identity-linked API key must name the workspace
-          it acts in:
+          This is a credentials or model-name problem, not a routing one — the request
+          reached the model provider and was refused. Check the key and model for the
+          provider you use:
         </p>
-        <pre class="code-box">export ANTHROPIC_API_KEY=sk-ant-...
-export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre>
+        <pre class="code-box">export OMNIBRIDGE_PROVIDER=gemini      # or anthropic
+export GEMINI_API_KEY=...              # or ANTHROPIC_API_KEY=sk-ant-...
+export OMNIBRIDGE_MODEL=...            # optional; must be a model your key can reach</pre>
         <p class="subtitle">Restart the server after setting it. Nothing was sent on-chain.</p>
       </div>
       ${renderTelemetryCards(data.traces, data)}`;
   }
 
   function renderNoRoute(data) {
+    // Two different answers share this status: the agent researched and concluded there
+    // is no route, or no agent ran at all. Advice for the second is wrong for the first.
+    const t2 = (data.traces && data.traces.step_2_discovery) || {};
+    const byAgent = t2.source_type === "AGENT_NO_ROUTE";
+    const sources = t2.sources || [];
     return `
       <div class="verdict verdict-amber">
         <h3>No route found</h3>
         <p>${esc(data.error || "No verified route covers this transfer.")}</p>
         <p class="subtitle">
           This is an answer, not a crash. Nothing was fabricated and nothing was sent.
-          A route the system has not verified is a route it does not have — set
-          <code>ANTHROPIC_API_KEY</code> so the agent can discover one, or run a pair
-          that already has a verified skill.
+          ${byAgent
+            ? `The agent researched this route and concluded there is none${sources.length ? `, citing ${sources.map((u) => `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(u)}</a>`).join(", ")}` : ""}. If you believe a route exists, run it again — the agent may find it on another attempt.`
+            : `No reasoning core ran, so only cached skills could answer. Configure a model provider (<code>GEMINI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code>, with <code>OMNIBRIDGE_PROVIDER</code>) so the agent can discover the route.`}
         </p>
       </div>
       ${renderTelemetryCards(data.traces, data)}`;
@@ -865,18 +975,33 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
   }
 
   function renderUnresolvedChain(data) {
+    // The resolver names the other network when the chain exists there. The run is
+    // still refused — crossing networks is what the boundary prevents — but the fix is
+    // one click, and "the registry does not carry it" would be untrue.
+    const other = /switch the network to (Testnet|Mainnet)/.exec(data.error || "");
     return `
       <div class="verdict verdict-amber">
-        <h3>Chain not resolved</h3>
+        <h3>${other ? `That chain is on ${esc(other[1].toLowerCase())}` : "Chain not resolved"}</h3>
         <p>${esc(data.error || "That chain could not be resolved.")}</p>
-        <p class="subtitle">
-          The EVM chain registry does not carry it. That means this source does not
-          know the chain — not that the chain does not exist, and not that no route
-          exists. Nothing was guessed and nothing was sent.
-        </p>
+        ${other ? `
+          <p class="subtitle">Nothing was guessed and nothing was sent. A run only resolves chains on the network you selected.</p>
+          <button type="button" class="btn btn-secondary" data-switch-network="${esc(other[1].toLowerCase())}">Switch to ${esc(other[1])} and retry</button>` : `
+          <p class="subtitle">
+            The EVM chain registry does not carry it. That means this source does not
+            know the chain — not that the chain does not exist, and not that no route
+            exists. Nothing was guessed and nothing was sent.
+          </p>`}
       </div>
       ${renderTelemetryCards(data.traces, data)}`;
   }
+
+  // Delegated, because the verdict is re-rendered on every run.
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-switch-network]");
+    if (!btn) return;
+    setNetwork(btn.getAttribute("data-switch-network"));
+    form.requestSubmit();
+  });
 
   function renderFailure(data) {
     const status = data.verification && data.verification.simulation_status;
@@ -1124,6 +1249,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
       currentRunId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
       resetLog();
       openLogStream(currentRunId);
+      startRunTimer("Running");
 
       const response = await fetch("/api/bridge/start", {
         method: "POST",
@@ -1135,6 +1261,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
           // an empty string the server has to interpret.
           recipient: recipientValue || undefined,
           runId: currentRunId,
+          network: selectedNetwork(),
         }),
       });
 
@@ -1143,6 +1270,9 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
       // Reported on every outcome, including failures — a run that took two minutes to
       // refuse is worth knowing about as much as one that took two minutes to succeed.
       showRunDuration(data.duration_seconds);
+      // The server's own measurement, so the number matches the log.
+      lastRunDuration = formatDuration(data.duration_seconds) || formatDuration((performance.now() - runTimerStarted) / 1000);
+      stopRunTimer(`⏱ ${data.status === "AWAITING_USER_APPROVAL" ? "Ready to sign in" : "Took"} ${lastRunDuration}`);
       syncPipeline(data);
 
       console.groupCollapsed("🌉 Omnibridge execution telemetry");
@@ -1159,6 +1289,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
         currentUnsignedHex = data.unsigned_transaction_hex;
         currentRouterAddress = data.route.router_address;
         currentSourceChainId = data.route.source_chain_id;
+        currentSourceChainMeta = data.source_chain_meta || null;
         currentAmount = data.amount;
         currentPlan = data.plan || null;
 
@@ -1188,6 +1319,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
       loadCards();
     } catch (err) {
       closeLogStream();
+      stopRunTimer(`⏱ Failed after ${formatDuration((performance.now() - runTimerStarted) / 1000)}`);
       outputSection.innerHTML = `<div class="verdict verdict-rose"><h3>Request failed</h3><p>${esc(err.message)}</p></div>`;
     } finally {
       executeBtn.disabled = false;
@@ -1221,6 +1353,7 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
 
     const primaryWallet = connectedWallets[0];
     const fromAddress = primaryWallet.accounts[0].address;
+    const signingStarted = performance.now();
     const provider = primaryWallet.provider;
 
     // The wallet's network decides where this lands, and nothing above here has
@@ -1246,16 +1379,16 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
 
     if (!walletChainHex || walletChainHex.toLowerCase() !== wantChainHex.toLowerCase()) {
       signBtn.innerHTML = `<span>Switching your wallet to ${esc(chainLabel(currentSourceChainId))}…</span>`;
-      let switched = false;
+      const switchError = await switchWalletChain(primaryWallet, wantChainHex);
+      // Asked of the wallet itself, not Onboard's cached state: only the provider can
+      // say which chain a signature would actually be made on.
+      let nowHex = null;
       try {
-        switched = await onboard.setChain({ chainId: wantChainHex });
-      } catch (switchErr) {
-        switched = false;
+        nowHex = await primaryWallet.provider.request({ method: "eth_chainId" });
+      } catch (e) {
+        nowHex = null;
       }
-      // setChain resolves false when the user declines or the wallet does not carry the
-      // network. Either way the wallet is still on the wrong chain, so stop here.
-      const nowHex = ((onboard.state.get().wallets[0] || {}).chains || [{}])[0].id || null;
-      if (!switched || !nowHex || nowHex.toLowerCase() !== wantChainHex.toLowerCase()) {
+      if (!nowHex || nowHex.toLowerCase() !== wantChainHex.toLowerCase()) {
         signBtn.disabled = false;
         signBtn.innerHTML = `<span>Sign in Wallet & Broadcast</span><span>🚀</span>`;
         setStepActive(5);
@@ -1264,8 +1397,9 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
            ${esc(chainLabel(currentSourceChainId))} (chain ${esc(String(currentSourceChainId))}),
            but your wallet is on ${esc(chainLabel(parseInt(walletChainHex || "0", 16)))}.
            The router address and the simulation are specific to
-           ${esc(chainLabel(currentSourceChainId))}. Switch networks in your wallet and
-           sign again — nothing was sent.</div>`);
+           ${esc(chainLabel(currentSourceChainId))}.
+           ${switchError ? `Your wallet did not switch: ${esc(switchError)}.` : ""}
+           Switch networks in your wallet and sign again — nothing was sent.</div>`);
         return;
       }
     }
@@ -1438,6 +1572,9 @@ export OMNIBRIDGE_WORKSPACE_ID=wrkspc_...   # only for identity-linked keys</pre
         </div>
         ${renderTelemetryCards(resData.traces, resData)}`;
 
+      // Two numbers, because they measure different things: how long the system took to
+      // get a verified route in front of you, and how long signing and mining took.
+      stopRunTimer(`⏱ Route in ${lastRunDuration || "?"} · signed & broadcast in ${formatDuration((performance.now() - signingStarted) / 1000)}`);
       loadSkills();
       loadCards();
     } catch (err) {

@@ -45,6 +45,14 @@ _ID = re.compile(r"^[a-z0-9_]+$")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TX_HASH = re.compile(r"^0x[0-9a-fA-F]{64}$")
 _DEST_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
+_VERSION = re.compile(r"^v(\d+)$")
+NETWORKS = ("mainnet", "testnet")
+
+
+def version_number(version: Optional[str]) -> int:
+    """'v2' -> 2. A card with no version counts as the oldest."""
+    m = _VERSION.match(version or "")
+    return int(m.group(1)) if m else 0
 
 
 class RowStatus(str, Enum):
@@ -232,6 +240,13 @@ class Card(BaseModel):
     docs: List[str] = Field(default_factory=list)
     supported_chains: List[str] = Field(default_factory=list)
     supported_tokens: List[str] = Field(default_factory=list)
+    #: "mainnet" or "testnet". A card only ever holds chains of its own network.
+    network: str = "mainnet"
+    #: Cards for different versions of one protocol share a family, e.g. "cctp".
+    protocol_family: Optional[str] = None
+    #: "v1", "v2", ... The agent always uses the highest version known for a family
+    #: on a network; lower versions are superseded and never offered or routed through.
+    protocol_version: Optional[str] = None
     card_version: int = 0
     last_updated: Optional[str] = None
 
@@ -249,6 +264,27 @@ class Card(BaseModel):
     def _id(cls, value: str) -> str:
         if not _ID.match(value):
             raise ValueError(f"protocol_id {value!r} must be lowercase letters, digits and underscores.")
+        return value
+
+    @field_validator("network")
+    @classmethod
+    def _network(cls, value: str) -> str:
+        if value not in NETWORKS:
+            raise ValueError(f"network must be one of {NETWORKS}, not {value!r}.")
+        return value
+
+    @field_validator("protocol_family")
+    @classmethod
+    def _family(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not _ID.match(value):
+            raise ValueError(f"protocol_family {value!r} must be lowercase letters, digits and underscores.")
+        return value
+
+    @field_validator("protocol_version")
+    @classmethod
+    def _version(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not _VERSION.match(value):
+            raise ValueError(f"protocol_version {value!r} must look like v1, v2, ...")
         return value
 
     @field_validator("protocol_name")
@@ -314,6 +350,14 @@ class Card(BaseModel):
     @property
     def roles(self) -> List[str]:
         return [slug(label) for label in self.address_labels]
+
+    @property
+    def family(self) -> str:
+        return self.protocol_family or self.protocol_id
+
+    @property
+    def version_number(self) -> int:
+        return version_number(self.protocol_version)
 
     @property
     def dest_scheme(self) -> Optional[str]:

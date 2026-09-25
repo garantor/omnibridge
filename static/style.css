@@ -989,3 +989,24 @@ body {
 .plan-step-body.fork-ok  { color: var(--on-green); }
 .plan-step-body.fork-bad { color: var(--on-rose); word-break: break-word; }
 .chain-cache a { color: var(--accent-cyan); }
+
+/* Network toggle and card network badges */
+.network-toggle { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; margin: 0.75rem 0 0.25rem; font-size: 0.85rem; color: var(--text-secondary); }
+.network-option { display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer; }
+.network-note { font-size: 0.78rem; color: var(--on-amber); }
+.skill-badge.testnet { background: rgba(245, 158, 11, 0.15); color: var(--on-amber); }
+.protocol-card .skill-name .skill-badge { margin-left: 0.35rem; }
+
+/* Run timer, beside the lifecycle heading */
+.section-title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.run-timer {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--accent-cyan);
+  background: rgba(6, 182, 212, 0.1);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  white-space: nowrap;
+}
+.run-timer.run-timer-done { color: var(--on-green); background: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.3); }

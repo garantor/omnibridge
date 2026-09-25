@@ -23,6 +23,7 @@ def handle_bridge(args):
         dest_chain=args.dest_chain,
         recipient=args.recipient,
         max_slippage_bps=args.slippage_bps,
+        network=args.network,
     )
 
     agent = OmnibridgeAgent()
@@ -143,6 +144,8 @@ def main(argv=None):
     bridge_parser.add_argument("--slippage-bps", type=int, default=50, help="Max slippage in basis points (50 = 0.5%%)")
     bridge_parser.add_argument("--yes", "-y", action="store_true", help="Auto-approve without interactive prompt (for tests/automation)")
     bridge_parser.add_argument("--dry-run", action="store_true", help="Rehearse without broadcasting; never inferred from a missing key")
+    bridge_parser.add_argument("--network", choices=["mainnet", "testnet"], default="mainnet",
+                               help="Network family every chain is resolved on (default mainnet)")
 
     # List skills subcommand
     subparsers.add_parser("list-skills", help="List persistent SKILL.md modules")

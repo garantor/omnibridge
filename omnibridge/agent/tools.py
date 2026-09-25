@@ -138,17 +138,72 @@ SCHEMAS: Dict[str, Dict[str, Any]] = {
             "Record something you established about a protocol on its card, so later runs "
             "start from it. Code checks it first (bytecode, selectors, an allowlisted "
             "documentation source) and saves it as unverified; only an approved broadcast "
-            "verifies it. Patch kinds: chain_row {network, chain_id, dest_id, addresses: "
-            "{column label: address}}; interface {label, signature, target}; failure_fix "
-            "{revert, fix} for a revert already on the card; new_card {protocol_name, docs, "
-            "supported_tokens, dest_id_label, address_labels, interfaces}."
+            "verifies it. Set patch_data.kind and fill only that kind's fields: "
+            "chain_row = chain_name, chain_id, dest_id, addresses; "
+            "interface = label, signature, target; "
+            "failure_fix = revert, fix (only for a revert already on the card); "
+            "new_card = protocol_name, protocol_family, protocol_version, card_network, docs, "
+            "supported_tokens, dest_id_label, address_labels, interfaces (only when the docs "
+            "describe a newer protocol version than any card has). Chain rows only go on the "
+            "latest version's card for the run's network."
         ),
         "input_schema": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "protocol_id": {"type": "string", "description": "e.g. cctp"},
-                "patch_data": {"type": "object", "description": "One patch; must include `kind`."},
+                "protocol_id": {"type": "string", "description": "The card's protocol_id, e.g. cctp_v2_testnet."},
+                # Every field is named. A provider that only fills declared fields (Gemini
+                # does) sent an empty object when this was a bare `object`, every time.
+                "patch_data": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["chain_row", "interface", "failure_fix", "new_card"]},
+                        "chain_name": {"type": "string", "description": "chain_row: display name, e.g. Arbitrum Sepolia."},
+                        "chain_id": {"type": "integer", "description": "chain_row: EIP-155 chain id."},
+                        "dest_id": {"type": "string", "description": "chain_row: the protocol's identifier for this chain, e.g. a CCTP domain."},
+                        "addresses": {
+                            "type": "array",
+                            "description": "chain_row: one entry per contract column on the card.",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "column": {"type": "string", "description": "The card's column label, e.g. Token Messenger."},
+                                    "address": {"type": "string"},
+                                },
+                                "required": ["column", "address"],
+                            },
+                        },
+                        "label": {"type": "string", "description": "interface: e.g. Deposit For Burn."},
+                        "signature": {"type": "string", "description": "interface: canonical signature."},
+                        "target": {"type": "string", "description": "interface: contract column it is called on."},
+                        "revert": {"type": "string", "description": "failure_fix: the recorded revert text."},
+                        "fix": {"type": "string", "description": "failure_fix: what fixes it, one sentence."},
+                        "protocol_name": {"type": "string"},
+                        "protocol_family": {"type": "string", "description": "new_card: e.g. cctp."},
+                        "protocol_version": {"type": "string", "description": "new_card: v1, v2, ..."},
+                        "card_network": {"type": "string", "enum": ["mainnet", "testnet"]},
+                        "docs": {"type": "array", "items": {"type": "string"}},
+                        "supported_tokens": {"type": "array", "items": {"type": "string"}},
+                        "dest_id_label": {"type": "string", "description": "new_card: e.g. CCTP Domain."},
+                        "address_labels": {"type": "array", "items": {"type": "string"}},
+                        "interfaces": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "signature": {"type": "string"},
+                                    "target": {"type": "string"},
+                                },
+                                "required": ["label", "signature"],
+                            },
+                        },
+                    },
+                    "required": ["kind"],
+                },
                 "sources": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -179,6 +234,8 @@ class ToolContext:
     web3_for: Web3ForChain
     domains: List[str]
     token_registry: Any = None
+    #: chain id -> "mainnet" | "testnet", from the chain registry.
+    network_for: Optional[Callable[[int], Optional[str]]] = None
 
 
 @dataclass
@@ -195,6 +252,7 @@ class AgentToolkit:
             raise ValueError(f"unknown tools {sorted(unknown)}")
         self.allowed = names
         self._counts: Dict[str, int] = {}
+        self._failed: Dict[str, str] = {}
 
     # ------------------------------------------------------------ interface
 
@@ -235,13 +293,24 @@ class AgentToolkit:
     def _dispatch(self, name: str, p: Dict[str, Any]) -> Dict[str, Any]:
         if not self.handles(name):
             return {"ok": False, "error": f"{name} is not available to you."}
+        # A model that repeats a call that already failed learns nothing new, and was
+        # observed doing it until its turns ran out. Say so rather than re-run it.
+        key = json.dumps([name, p], sort_keys=True, default=str)
+        if key in self._failed:
+            return {"ok": False, "error": (
+                "You already made exactly this call and it failed: "
+                f"{self._failed[key]} Change the arguments, use another tool, or conclude "
+                "with propose_route or no_route_found.")}
         exhausted = self._spend(name)
         if exhausted:
             return {"ok": False, "error": exhausted}
         try:
-            return getattr(self, f"_{name}")(p)
+            result = getattr(self, f"_{name}")(p)
         except Exception as exc:  # the model reads this and adjusts
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        if not result.get("ok", False):
+            self._failed[key] = result.get("error") or "; ".join(result.get("reasons", [])) or "refused"
+        return result
 
     # ---------------------------------------------------------------- tools
 
@@ -345,5 +414,6 @@ class AgentToolkit:
             [str(s) for s in (p.get("sources") or [])],
             self.ctx.web3_for,
             self.ctx.domains,
+            network_for=self.ctx.network_for,
         )
         return {"ok": result.accepted, **result.as_dict()}

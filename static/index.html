@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css?v=5.1">
+  <link rel="stylesheet" href="/static/style.css?v=5.3">
 </head>
 <body>
   <div class="app-container">
@@ -85,19 +85,32 @@
             </p>
           </details>
 
+          <!-- Network. Every chain in the run is resolved on this family, and the
+               resolver refuses to cross it, so a testnet run can never touch mainnet. -->
+          <div class="network-toggle" role="radiogroup" aria-label="Network">
+            <span class="quick-label">Network:</span>
+            <label class="network-option"><input type="radio" name="network" value="mainnet" checked> Mainnet</label>
+            <label class="network-option"><input type="radio" name="network" value="testnet"> Testnet</label>
+            <span id="network-note" class="network-note hidden">Testnet: write two-word chains with a hyphen, e.g. <code>arbitrum-sepolia</code>.</span>
+          </div>
+
           <!-- Quick Templates -->
           <div class="quick-templates">
             <span class="quick-label">Quick suggestions:</span>
             <button type="button" class="chip" data-intent="Bridge 50 USDC from Base to Solana">Base ➔ Solana (50 USDC)</button>
             <button type="button" class="chip" data-intent="Bridge 25 USDC from Base to Arbitrum">Base ➔ Arbitrum (25 USDC)</button>
             <button type="button" class="chip" data-intent="Bridge 10 USDC from Stellar to Arbitrum">Stellar ➔ Arbitrum (10 USDC)</button>
+            <button type="button" class="chip" data-network="testnet" data-intent="Bridge 1 USDC from arbitrum-sepolia to base-sepolia">Arbitrum Sepolia ➔ Base Sepolia (1 USDC, testnet)</button>
           </div>
         </form>
       </section>
 
       <!-- Live Execution Pipeline Visualizer -->
       <section class="pipeline-section card">
-        <h3 class="section-title">Execution Lifecycle</h3>
+        <div class="section-title-row">
+          <h3 class="section-title">Execution Lifecycle</h3>
+          <span id="run-timer" class="run-timer hidden" title="Wall-clock time for this run"></span>
+        </div>
         <div class="pipeline-tracker">
           <div class="pipeline-step" id="step-1">
             <div class="step-badge">1</div>
@@ -199,6 +212,6 @@
     </main>
   </div>
 
-  <script type="module" src="/static/app.js?v=6.1"></script>
+  <script type="module" src="/static/app.js?v=6.4"></script>
 </body>
 </html>

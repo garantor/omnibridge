@@ -40,6 +40,9 @@ class RouteMatch:
     card_dest_id: Optional[str] = None
     #: Whether a broadcast confirmed the card's identifier.
     card_dest_confirmed: bool = False
+    #: The newer card of the same family, when the matched card is superseded.
+    superseded_by: Optional[str] = None
+    protocol_version: Optional[str] = None
 
     @property
     def dest_agrees(self) -> Optional[bool]:
@@ -63,7 +66,8 @@ def match_route(
         router = Web3.to_checksum_address(router_address)
     except Exception:
         return None
-    for doc in manager.list_cards():
+    docs = manager.list_cards()
+    for doc in docs:
         card = doc.card
         row = card.row(source_chain_id)
         if row is None:
@@ -84,6 +88,8 @@ def match_route(
             dest_id=dest_value,
             card_dest_id=dest_row.dest_id if dest_row else None,
             card_dest_confirmed=bool(dest_row and dest_row.dest_confirmed),
+            superseded_by=getattr(manager.superseded_by(card, docs), "protocol_id", None),
+            protocol_version=card.protocol_version,
         )
     return None
 

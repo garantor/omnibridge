@@ -208,7 +208,47 @@ Target: Uniswap V3 swap on the source chain → CCTP → DEX swap on the destina
 human. The human approves each leg's transactions when they're signed. Each sub-agent's
 budget draws from the same `RequestBudget`.
 
-## 7. Configuration
+## 7. Latest version, always, and testnet
+
+### The rule
+
+The agent always uses a protocol's latest version. Circle's own `llms.txt` says the same
+for CCTP: "V1 is legacy; always use V2." It's enforced in code:
+
+| Where | How |
+| --- | --- |
+| Cards | `protocol_family`, `protocol_version` and `network` in frontmatter. A card is *superseded* when its family has a newer version on the same network |
+| Selection | Superseded cards are never offered. The latest card is offered even with no rows, so the agent has its interfaces and docs to find them |
+| Routing | A proposal whose router is on a superseded card is refused before simulation, naming the latest card |
+| Skills | A cached skill on a superseded version is not replayed. With no model configured, the run ends `NO_ROUTE_FOUND` rather than replaying it |
+| Proposals | Rows and interfaces can't be added to a superseded card. `new_card` must be for a newer version than the family's latest on that network |
+
+Seeded now: `cctp` (V1, mainnet, superseded), `cctp_v2` (mainnet) and `cctp_v2_testnet`,
+both with the V2 interface `depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)`
+and **no chain rows**. The agent finds and proposes each deployment. The V2 selector was
+confirmed on chain on Arbitrum, Base, Arbitrum Sepolia and Base Sepolia before seeding.
+
+Consequence: the verified V1 Arbitrum → Base route is no longer used on mainnet. The
+first V2 mainnet transfer goes through discovery.
+
+### Testnet
+
+`network` ("mainnet" | "testnet") now runs through the whole pipeline: the
+`/api/bridge/start` and `/api/preflight` requests, graph state, every chain lookup and
+RPC race, skill lookup and saving, card selection, and a Mainnet/Testnet toggle in the
+UI. The chain resolver refuses to cross networks, and a chain row is only accepted on a
+card of its network, decided from chain-registry data (`RPCManager.network_of`), never
+from a name.
+
+Write two-word testnet chains with a hyphen: `arbitrum-sepolia`, `base-sepolia`. The
+parser turns hyphens into spaces, which is how the registry names them.
+
+Verified live, with a scripted provider standing in for the model: on a testnet run only
+`cctp_v2_testnet` was offered; Arbitrum Sepolia and Base Sepolia rows passed the live
+code check and were saved `unverified`; a mainnet chain on the testnet card and a row on
+the V1 card were both refused; the V2 route matched the Arbitrum Sepolia row.
+
+## 8. Configuration
 
 | Variable | Effect |
 | --- | --- |
@@ -219,7 +259,7 @@ budget draws from the same `RequestBudget`.
 CLI: `omnibridge cards list`; `omnibridge cards check <id>` re-runs the code check,
 report-only.
 
-## 8. Found while building
+## 9. Found while building
 
 - **A rejected proposal escaped the graph as an exception.** The docstring said the retry
   path handled it; in fact the run ended in ERROR. It now returns to discovery with the
@@ -228,13 +268,26 @@ report-only.
   `Insufficient funds for gas` was treated as fork infrastructure and would have been
   ignored. It's now a real failure.
 - **CCTP's wrong-domain revert** is `No TokenMessenger for domain` (section 2).
+- **"sepolia" alone resolves to the wrong chain.** The resolver's name-prefix match sends it
+  to *Sepolia PGN* (58008), not Ethereum Sepolia, and the similarity guard lets it through.
+  This predates this work and isn't fixed here. Use `ethereum-sepolia`.
+- **Two-word chain names never reached the resolver.** The intent pattern captures one
+  word per chain, so "Arbitrum Sepolia" became "Arbitrum", which is ambiguous on testnet.
+  Hyphenated names now work.
 
-## 9. Open decisions
+## 10. Open decisions
 
 1. **Rule B.** Hand-seeded cards are authored knowledge. The proposed wording from
    [PROTOCOL_CARDS.md](PROTOCOL_CARDS.md) section 2 ("authored knowledge enters as a lead,
    never as a fact") still needs sign-off.
 2. **Committing card writes.** Runs write to `protocols/` in the working tree, as they do to
    `skills/`. Commit them for a reviewable history, or keep runtime writes out of git?
-3. **`OMNIBRIDGE_CARD_AUTHORITY` default.** Recommend turning it on once the golden routes
+3. **CCTP V2's `maxFee` is chosen by the model.** V2 adds `maxFee`, the most the
+   destination may deduct from the minted amount for a fast transfer. It is money, but the
+   approval screen shows the burned amount, not the fee cap, and nothing bounds it. Under
+   Rule A this should be computed or bounded by code (e.g. 0 for standard transfers, or a
+   cap from Circle's fee endpoint) and shown to the human. Not done yet.
+4. **Chains that still require V1.** Circle notes Noble, Sui and Aptos still need V1. The
+   rule as built refuses V1 everywhere; a route to one of those would need an exception.
+5. **`OMNIBRIDGE_CARD_AUTHORITY` default.** Recommend turning it on once the golden routes
    show no rise in first-attempt reverts.

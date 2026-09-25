@@ -232,6 +232,18 @@ class AnthropicDiscoveryAgent(DiscoveryProvider):
                     payload = json.loads(payload)
 
                 if name == "no_route_found":
+                    from omnibridge.agent.contract import unsupported_no_route
+
+                    why = unsupported_no_route(payload) if tools is not None else None
+                    if why and budget.model_calls < budget.max_model_calls - 1:
+                        # Sent back rather than accepted: see unsupported_no_route.
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": getattr(block, "id", ""),
+                            "content": json.dumps({"ok": False, "error": why}),
+                            "is_error": True,
+                        })
+                        continue
                     if trace is not None:
                         trace.update({"turns": turns, "outcome": "NO_ROUTE_FOUND"})
                     raise NoRouteFound(
@@ -259,7 +271,7 @@ class AnthropicDiscoveryAgent(DiscoveryProvider):
                 messages.append({"role": "assistant", "content": response.content})
                 continue
 
-            if getattr(response, "stop_reason", None) == "tool_use":
+            if getattr(response, "stop_reason", None) == "tool_use" or tool_results:
                 if tool_results:
                     messages.append({"role": "assistant", "content": response.content})
                     messages.append({"role": "user", "content": tool_results})

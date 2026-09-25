@@ -34,23 +34,32 @@ def select_cards(
     source_name: str,
     dest_name: str,
     dest_chain_id: Optional[int] = None,
+    network: str = "mainnet",
 ) -> List[Card]:
     """
-    Cards that carry this token and know either end of the route.
+    The latest-version cards for this network that carry this token and know either
+    end of the route.
 
-    Ranked so a card with a verified contract on the source chain comes first. A card
-    that knows neither chain is still no help, however well it matches the token.
+    A superseded card (an older version of a family that has a newer card on this
+    network) is never offered: the agent always works from the latest version. A card
+    for a family's latest version is offered even before it has chain rows, because
+    its interfaces and docs are what the agent needs to find them.
     """
     names = {_norm(source_name), _norm(dest_name)}
+    docs = manager.list_cards()
     picked = []
-    for doc in manager.list_cards():
+    for doc in docs:
         card = doc.card
+        if card.network != network or manager.superseded_by(card, docs) is not None:
+            continue
         if _norm(token) not in {_norm(t) for t in card.supported_tokens}:
             continue
         chain_ids = {r.chain_id for r in card.rows}
         known_names = {_norm(c) for c in card.supported_chains} | {_norm(r.network) for r in card.rows}
-        if not (source_chain_id in chain_ids or (dest_chain_id in chain_ids if dest_chain_id else False)
-                or names & known_names):
+        knows_route = (source_chain_id in chain_ids
+                       or (dest_chain_id in chain_ids if dest_chain_id else False)
+                       or bool(names & known_names))
+        if not knows_route and card.rows:
             continue
         row = card.row(source_chain_id)
         rank = _RANK[row.status] if row else 3
@@ -59,7 +68,11 @@ def select_cards(
 
 
 def render_card(card: Card) -> str:
-    lines = [f"[{card.protocol_id}] {card.protocol_name}"]
+    version = f" {card.protocol_version} (latest known version)" if card.protocol_version else ""
+    lines = [f"[{card.protocol_id}] {card.protocol_name}{version}, {card.network}"]
+    if not card.rows:
+        lines.append("  no chains recorded yet: find this version's deployments in the docs, "
+                     "check them, and record each with propose_card_update")
     if card.docs:
         lines.append("  docs to read: " + ", ".join(card.docs))
     if card.dest_id_label:

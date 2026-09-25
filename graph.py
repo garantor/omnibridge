@@ -66,6 +66,9 @@ class GraphState(TypedDict):
     # The protocol card row this route's contract came from, matched in code on the
     # router address. Write-back uses it; the model's say-so is never consulted.
     card_match: Optional[Dict[str, Any]]
+    # "mainnet" or "testnet". Every chain in the run is resolved on this family, and
+    # resolution refuses to cross it; skills and cards are scoped to it as well.
+    network: Optional[str]
     # The simulation failed on an Anvil fork *after* the plan's approval was applied
     # there, so an allowance revert means a wrong spender, not a missing approval.
     fork_failure: Optional[bool]
@@ -89,9 +92,30 @@ def _agent_tools_disabled() -> bool:
     return os.environ.get("OMNIBRIDGE_DISABLE_AGENT_TOOLS", "").strip().lower() in ("1", "true", "yes")
 
 
-def _dest_chain_id(name: str) -> Optional[int]:
+def _network(state: Dict[str, Any]) -> str:
+    """The run's network family. Mainnet unless the request said otherwise."""
+    return state.get("network") or "mainnet"
+
+
+def _superseded_skill(skill: Any) -> Optional[str]:
+    """
+    The newer card that supersedes the protocol version a cached skill routes through.
+
+    "Always use the latest version": a verified skill for an older version is not a
+    reason to keep using it. Matched on the skill's router address, like any route.
+    """
+    if skill is None:
+        return None
+    from omnibridge.cards.writeback import match_route
+
+    match = match_route(card_mgr, skill.metadata.source_chain_id,
+                        skill.metadata.router_address, None, None)
+    return match.superseded_by if match else None
+
+
+def _dest_chain_id(name: str, network: str = "mainnet") -> Optional[int]:
     try:
-        return rpc_mgr.discover_chain_metadata(name).chain_id
+        return rpc_mgr.discover_chain_metadata(name, network=network).chain_id
     except Exception:
         return None
 
@@ -115,6 +139,12 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
             "this transfer."
         )
     slip = state.get("slippage") or "0.5%"
+    # Refused, not defaulted: a typo'd network silently becoming mainnet would resolve
+    # every chain in the run on the network holding real funds.
+    if _network(state) not in ("mainnet", "testnet"):
+        raise ValueError(
+            f"Intent Error: network must be 'mainnet' or 'testnet', not {state.get('network')!r}."
+        )
 
     # Optional, and validated as strictly as the sender. An unparseable recipient is
     # refused rather than quietly falling back to the sender: someone who names a
@@ -140,8 +170,11 @@ def intent_parser_node(state: GraphState) -> Dict[str, Any]:
             amt = float(match.group(1))
             if match.group(2):
                 tok = match.group(2).upper()
-            src = match.group(3)
-            dst = match.group(4)
+            # "arbitrum-sepolia" is how a two-word chain name survives a one-word
+            # pattern. Resolved as "arbitrum sepolia": the registry's names use spaces,
+            # and a hyphen matched nothing, so the testnet was unreachable by name.
+            src = re.sub(r"[-_]+", " ", match.group(3)).strip()
+            dst = re.sub(r"[-_]+", " ", match.group(4)).strip()
 
         # Only ever an explicit 0x address behind an explicit word. The chain regex above
         # already owns "to <name>", so nothing here can turn a destination chain into a
@@ -257,7 +290,7 @@ def preflight_node(state: GraphState) -> Dict[str, Any]:
     # ends the run as a recorded refusal like every other honest "no".
     try:
         with log.timed(f"resolve chain '{src_name}'"):
-            src_info = rpc_mgr.discover_chain_metadata(src_name)
+            src_info = rpc_mgr.discover_chain_metadata(src_name, network=_network(state))
     except ChainResolutionError as exc:
         log.fail(str(exc))
         traces["step_1b_preflight"] = {
@@ -269,7 +302,7 @@ def preflight_node(state: GraphState) -> Dict[str, Any]:
         return {"status": "UNRESOLVED_CHAIN", "error": str(exc), "traces": traces}
 
     try:
-        rpc_url = rpc_mgr.get_fastest_rpc_sync(src_name)
+        rpc_url = rpc_mgr.get_fastest_rpc_sync(src_name, network=_network(state))
     except Exception as exc:
         # Not fatal. No balance can be read, which the report states as UNCHECKED.
         log.warn(f"no reachable RPC for {src_name}: {exc}")
@@ -354,6 +387,7 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
         source_chain=state["source_chain"],
         dest_chain=state["target_chain"],
         recipient=state.get("recipient") or state["user_address"],
+        network=_network(state),
     )
 
     # Tier 0: a verified skill short-circuits discovery entirely.
@@ -361,6 +395,22 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
     agent_result = _run_discovery_agent(state, intent)
     if agent_result is not None:
         return agent_result
+
+    cached = skill_mgr.find_skill(intent.source_chain, intent.dest_chain, intent.token,
+                                  network=intent.network)
+    newer = _superseded_skill(cached)
+    if newer:
+        reason = (
+            f"The cached route for this transfer uses a protocol version that card {newer} "
+            "supersedes, and the latest version is always used. No reasoning core is "
+            "available to establish the route on the latest version."
+        )
+        traces = state.get("traces", {})
+        traces["step_2_discovery"] = {
+            "title": "Route & Contract Discovery", "source_type": "SKILL_MEMORY_CACHE",
+            "outcome": "NO_ROUTE_FOUND", "reason": reason, "status": "COMPLETED",
+        }
+        return {"status": "NO_ROUTE_FOUND", "error": reason, "traces": traces}
 
     # Cache-only. There is no third tier: the web-scraping fallback that used to sit
     # here returned the first hex string it found on a search page as the router
@@ -385,7 +435,7 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
         _console.print(Panel(
             f"[bold yellow]{exc}[/bold yellow]\n\n"
             "[dim]No verified route, and no reasoning core available to find one — set "
-            "ANTHROPIC_API_KEY, or unset OMNIBRIDGE_DISABLE_AGENT.[/dim]",
+            "GEMINI_API_KEY or ANTHROPIC_API_KEY, or unset OMNIBRIDGE_DISABLE_AGENT.[/dim]",
             title="[bold yellow]📋 [STEP 2: NO ROUTE FOUND][/bold yellow]",
             border_style="yellow",
         ))
@@ -394,7 +444,7 @@ def discovery_node(state: GraphState) -> Dict[str, Any]:
             "error": str(exc),
             "traces": traces,
         }
-    fastest_rpc = rpc_mgr.get_fastest_rpc_sync(state["source_chain"])
+    fastest_rpc = rpc_mgr.get_fastest_rpc_sync(state["source_chain"], network=_network(state))
     skill_name = quote.extra_params.get("skill_name")
 
     _console.print(Panel(
@@ -479,7 +529,9 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
 
     if agent_disabled():
         return None
-    if skill_mgr.find_skill(intent.source_chain, intent.dest_chain, intent.token):
+    cached = skill_mgr.find_skill(intent.source_chain, intent.dest_chain, intent.token,
+                                  network=intent.network)
+    if cached is not None and not _superseded_skill(cached):
         return None
 
     # No provider configured is not an error — it is the cache-only mode, and the
@@ -515,7 +567,7 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     log.value("resolved to", f"{src_info.name} (chain id {src_info.chain_id})")
 
     with log.timed(f"race {len(src_info.rpc_urls)} RPC endpoint(s)"):
-        fastest_rpc = rpc_mgr.get_fastest_rpc_sync(intent.source_chain)
+        fastest_rpc = rpc_mgr.get_fastest_rpc_sync(intent.source_chain, network=intent.network)
     log.value("fastest RPC", fastest_rpc)
 
     # Counters carry across retries, not just the limits — see RequestBudget.restore.
@@ -526,9 +578,9 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
     # gets its toolkit so it can check them — and its own research — before proposing.
     from omnibridge.cards.context import render_for_agent, select_cards
 
-    dest_chain_id = _dest_chain_id(state["target_chain"])
+    dest_chain_id = _dest_chain_id(state["target_chain"], intent.network)
     cards = select_cards(card_mgr, intent.token, src_info.chain_id, intent.source_chain,
-                         state["target_chain"], dest_chain_id)
+                         state["target_chain"], dest_chain_id, network=intent.network)
     cards_context = render_for_agent(cards)
     log.value("protocol cards offered", ", ".join(c.protocol_id for c in cards) or "none")
 
@@ -545,6 +597,7 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
             cards=card_mgr,
             web3_for=default_web3_for(),
             domains=agent.domains,
+            network_for=rpc_mgr.network_of,
         ))
 
     import inspect
@@ -638,6 +691,14 @@ def _run_discovery_agent(state: GraphState, intent: UserIntent) -> Optional[Dict
 
     log.step("checking the proposal (Rule A boundary — the model stops choosing here)")
     try:
+        if match and match.superseded_by:
+            # The latest version is always used. A verified route on an older version is
+            # still an older version.
+            raise ProposalRejected(
+                f"The router is on card {match.protocol_id} ({match.protocol_version}), which "
+                f"card {match.superseded_by} supersedes. Always use the protocol's latest "
+                f"version: establish the route from {match.superseded_by}."
+            )
         if match and match.dest_agrees is False and match.card_dest_confirmed:
             # The plan's own example failure: a destination named by its EIP-155 id where
             # the protocol wants its own identifier. A broadcast confirmed the card's
@@ -875,6 +936,7 @@ def code_builder_node(state: GraphState) -> Dict[str, Any]:
         source_chain=state["source_chain"],
         dest_chain=state["target_chain"],
         recipient=state.get("recipient") or state["user_address"],
+        network=_network(state),
     )
 
     # An agent proposal arrives already encoded, and already checked: synthesis
@@ -920,7 +982,7 @@ def code_builder_node(state: GraphState) -> Dict[str, Any]:
     from omnibridge.steplog import StepLogger
 
     plog = StepLogger("plan")
-    src_info = rpc_mgr.discover_chain_metadata(state["source_chain"])
+    src_info = rpc_mgr.discover_chain_metadata(state["source_chain"], network=_network(state))
     w3 = _verified_web3(state.get("active_rpc"), src_info.chain_id)
     spend = (quote.extra_params or {}).get("spend")
     plan_notes: list = []
@@ -962,8 +1024,8 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
 
     log = StepLogger("simulate")
     src_name = state["source_chain"]
-    src_info = rpc_mgr.discover_chain_metadata(src_name)
-    rpc_url = state.get("active_rpc") or rpc_mgr.get_fastest_rpc_sync(src_name)
+    src_info = rpc_mgr.discover_chain_metadata(src_name, network=_network(state))
+    rpc_url = state.get("active_rpc") or rpc_mgr.get_fastest_rpc_sync(src_name, network=_network(state))
     log.step(f"eth_call to {state['route']['router_address']} on chain {src_info.chain_id}")
     log.value("from", state["user_address"])
     log.value("calldata", state["unsigned_transaction_hex"], limit=90)
@@ -1171,8 +1233,26 @@ def hitl_gate_node(state: GraphState) -> Dict[str, Any]:
     decoded_raw = CalldataExecutor.decode_leading_uint256(calldata)
     decoded_amount = decoded_raw / (10 ** decimals) if decoded_raw is not None else None
 
+    # What the browser needs to put the wallet on the right chain: a readable name, and
+    # for a chain the wallet does not know yet, the parameters wallet_addEthereumChain
+    # takes. The RPC offered is the one this run identity-checked, not a registry guess.
+    source_chain_meta = None
+    try:
+        info = rpc_mgr.discover_chain_metadata(state["source_chain"], network=_network(state))
+        source_chain_meta = {
+            "chain_id": info.chain_id,
+            "name": info.name,
+            "native_symbol": info.native_symbol,
+            "explorer": info.block_explorer or None,
+            "rpc_url": state.get("active_rpc") or (info.rpc_urls[0] if info.rpc_urls else None),
+        }
+    except Exception:
+        source_chain_meta = None
+
     approval_payload = {
         "status": "AWAITING_USER_APPROVAL",
+        "network": _network(state),
+        "source_chain_meta": source_chain_meta,
         "route": {
             "source": state["source_chain"],
             "target": state["target_chain"],
@@ -1239,7 +1319,7 @@ def hitl_gate_node(state: GraphState) -> Dict[str, Any]:
 
 # --- NODE 6: Broadcast & Skill Save ---
 def broadcast_skill_node(state: GraphState) -> Dict[str, Any]:
-    src_chain_info = rpc_mgr.discover_chain_metadata(state["source_chain"])
+    src_chain_info = rpc_mgr.discover_chain_metadata(state["source_chain"], network=_network(state))
     signer = Signer(state["active_rpc"], src_chain_info.block_explorer)
 
     tx_payload = {
@@ -1311,7 +1391,7 @@ def _persist_route_as_skill(state: GraphState, receipt: Any) -> str:
     Split out of the broadcast node so its failures are catchable there. It runs after
     the transaction is already on chain, so nothing it does may raise past its caller.
     """
-    src_chain_info = rpc_mgr.discover_chain_metadata(state["source_chain"])
+    src_chain_info = rpc_mgr.discover_chain_metadata(state["source_chain"], network=_network(state))
     quote = RouteQuote(**state["route"]["quote_obj"])
     params = quote.extra_params or {}
     src_name = state["source_chain"]
@@ -1333,7 +1413,7 @@ def _persist_route_as_skill(state: GraphState, receipt: Any) -> str:
     dest_chain_id: Optional[int] = None
     dest_chain_ref = params.get("dest_chain_ref")
     try:
-        dest_chain_id = rpc_mgr.discover_chain_metadata(dst_name).chain_id
+        dest_chain_id = rpc_mgr.discover_chain_metadata(dst_name, network=_network(state)).chain_id
     except Exception:
         dest_chain_id = None
 
@@ -1354,7 +1434,7 @@ def _persist_route_as_skill(state: GraphState, receipt: Any) -> str:
         router_address=state["route"]["router_address"],
         source_token_address=quote.source_token_address or None,
         dest_token_address=quote.dest_token_address or None,
-        network="mainnet",
+        network=_network(state),
         function_signature=params.get("function_signature"),
         param_types=list(params.get("param_types") or []),
         param_values=stored_values,

@@ -219,6 +219,24 @@ class RouteProposal:
         )
 
 
+def unsupported_no_route(payload: Dict[str, Any]) -> Optional[str]:
+    """
+    Why a `no_route_found` answer is not yet a conclusion, or None if it is one.
+
+    "No route" is terminal and never retried, so it has to be an answer about the world.
+    Observed: a model with tools called it as a probe, with the reason "testing tool
+    availability" and no sources, and the run ended there. A no-route that cites nothing
+    is sent back while the model still has turns; on its last turn it is accepted, so
+    an honest "no" is always possible.
+    """
+    sources = [s for s in (payload.get("sources") or []) if str(s).startswith("http")]
+    if not sources:
+        return ("no_route_found must cite the documentation you read that shows there is "
+                "no route. If you have not researched it yet, use your tools and the docs "
+                "first; if you have established a route, call propose_route.")
+    return None
+
+
 PROPOSAL_REQUIRED_FIELDS = (
     "protocol",
     "router_address",

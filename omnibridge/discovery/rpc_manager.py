@@ -5,6 +5,7 @@ Zero synthetic fake URLs.
 """
 
 import asyncio
+import re
 import time
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
@@ -136,11 +137,45 @@ class RPCManager:
                 f"cannot resolve '{chain_name}'."
             ) from exc
 
-        entry = self._match_registry_entry(key, chains, network)
+        try:
+            entry = self._match_registry_entry(key, chains, network)
+        except UnresolvedChainError as first:
+            # "ethereum-sepolia" is how a two-word name gets typed where a sentence
+            # parser takes one word per chain. The registry's names use spaces, so the
+            # hyphenated form matched nothing and a real testnet looked unknown.
+            spaced = re.sub(r"[-_]+", " ", key).strip()
+            entry = None
+            if spaced != key:
+                try:
+                    entry = self._match_registry_entry(spaced, chains, network)
+                except UnresolvedChainError:
+                    entry = None
+            if entry is None:
+                hint = self._other_network_hint(spaced, chains, network)
+                if hint:
+                    raise UnresolvedChainError(f"{first} {hint}") from first
+                raise
         info = self._to_chain_info(entry)
         self.dynamic_chains[cache_key] = info
         self.dynamic_chains[info.name.lower()] = info
         return info
+
+    def _other_network_hint(self, key: str, chains: List[Dict[str, Any]], network: str) -> Optional[str]:
+        """
+        Say so when the name is a chain on the other network family.
+
+        Not a fallback: the run still refuses, because resolving a testnet name on a
+        mainnet run (or the reverse) is exactly the crossing the network boundary exists
+        to prevent. It only turns "the registry does not carry it" — misleading, when it
+        does — into the action that fixes it.
+        """
+        other = "testnet" if network == "mainnet" else "mainnet"
+        try:
+            entry = self._match_registry_entry(key, chains, other)
+        except ChainResolutionError:
+            return None
+        return (f"It is a {other} chain ({entry.get('name')}, chain id {entry.get('chainId')}): "
+                f"switch the network to {other.capitalize()} to use it.")
 
     def discover_chain_by_id(self, chain_id: int) -> ChainInfo:
         """
@@ -166,6 +201,16 @@ class RPCManager:
         info = self._to_chain_info(entry)
         self.dynamic_chains[cache_key] = info
         return info
+
+    def network_of(self, chain_id: int) -> Optional[str]:
+        """'mainnet' or 'testnet' for a chain id, from registry data alone; None if unknown."""
+        try:
+            chains = self._fetch_registry()
+        except Exception:
+            return None
+        by_id = {int(c.get("chainId", -1)): c for c in chains}
+        entry = by_id.get(int(chain_id))
+        return _network_family(entry, by_id) if entry is not None else None
 
     def _match_registry_entry(
         self, key: str, chains: List[Dict[str, Any]], network: str
@@ -288,9 +333,9 @@ class RPCManager:
             pass
         return (rpc_url, 9999.0, False)
 
-    async def race_rpcs(self, chain_name: str) -> str:
+    async def race_rpcs(self, chain_name: str, network: str = "mainnet") -> str:
         """Concurrently races discovered public RPCs and returns the fastest active endpoint."""
-        chain = self.discover_chain_metadata(chain_name)
+        chain = self.discover_chain_metadata(chain_name, network=network)
         urls = chain.rpc_urls
         if not urls:
             return ""
@@ -306,12 +351,12 @@ class RPCManager:
         valid_results.sort(key=lambda x: x[1])
         return valid_results[0][0]
 
-    def get_fastest_rpc_sync(self, chain_name: str) -> str:
+    def get_fastest_rpc_sync(self, chain_name: str, network: str = "mainnet") -> str:
         """Synchronous wrapper for RPC racing."""
         try:
-            return asyncio.run(self.race_rpcs(chain_name))
+            return asyncio.run(self.race_rpcs(chain_name, network))
         except Exception as e:
-            chain = self.discover_chain_metadata(chain_name)
+            chain = self.discover_chain_metadata(chain_name, network=network)
             if chain.rpc_urls:
                 return chain.rpc_urls[0]
             raise ConnectionError(f"RPC Failure: Could not establish connection to '{chain_name}' RPC: {e}")

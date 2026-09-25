@@ -11,7 +11,10 @@ supported_chains:
 - base
 supported_tokens:
 - USDC
-card_version: 1
+network: mainnet
+protocol_family: cctp
+protocol_version: v1
+card_version: 2
 last_updated: '2026-09-24'
 ---
 

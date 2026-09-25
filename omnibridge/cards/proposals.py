@@ -31,7 +31,7 @@ preconditions are re-checked under the lock, so a concurrent write cannot slip b
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from omnibridge.cards.manager import CardManager, CardWriteRefused
 from omnibridge.cards.models import Card, ChainRow, FailureMode, Interface, RowStatus, slug
@@ -77,8 +77,14 @@ def _first_primary(sources: List[str], domains: List[str]) -> Optional[str]:
     return next((u for u in sources if registrable_domain(u) in primary_hosts and u.startswith("https://")), None)
 
 
-def _role_addresses(card: Card, raw: Dict[str, Any]) -> Dict[str, str]:
-    """Accept either the column label ("Token Messenger") or its slug as the key."""
+def _role_addresses(card: Card, raw: Any) -> Dict[str, str]:
+    """
+    Accept {column: address} or [{column, address}], with the column as its label
+    ("Token Messenger") or slug. The list form is what the tool schema asks for, because
+    a provider that fills only declared fields cannot fill a map with open keys.
+    """
+    if isinstance(raw, list):
+        raw = {str(item.get("column", "")): item.get("address", "") for item in raw if isinstance(item, dict)}
     out = {}
     for key, value in (raw or {}).items():
         role = slug(str(key).removesuffix(" Address").removesuffix(" address"))
@@ -95,6 +101,7 @@ def apply_patch(
     sources: List[str],
     web3_for: Web3ForChain,
     domains: List[str],
+    network_for: Optional[Callable[[int], Optional[str]]] = None,
 ) -> ProposalResult:
     kind = str((patch or {}).get("kind", ""))
     if kind not in PATCH_KINDS:
@@ -105,8 +112,14 @@ def apply_patch(
         doc = manager.load(protocol_id)
         if doc is None:
             return _refuse(kind, protocol_id, f"No card {protocol_id!r}. Propose a new_card first.")
+        newer = manager.superseded_by(doc.card)
+        if newer is not None and kind in ("chain_row", "interface"):
+            return _refuse(kind, protocol_id,
+                           f"{protocol_id} ({doc.card.protocol_version}) is superseded by "
+                           f"{newer.protocol_id} ({newer.protocol_version}). Always use the latest "
+                           "version; record this on that card instead.")
         if kind == "chain_row":
-            return _chain_row(manager, doc.card, patch, sources, web3_for, domains)
+            return _chain_row(manager, doc.card, patch, sources, web3_for, domains, network_for)
         if kind == "interface":
             return _interface(manager, doc.card, patch, sources, web3_for, domains)
         return _failure_fix(manager, doc.card, patch)
@@ -116,10 +129,10 @@ def apply_patch(
         return _refuse(kind, protocol_id, str(exc))
 
 
-def _chain_row(manager, card: Card, patch, sources, web3_for, domains) -> ProposalResult:
+def _chain_row(manager, card: Card, patch, sources, web3_for, domains, network_for=None) -> ProposalResult:
     pid = card.protocol_id
     row = ChainRow(
-        network=patch.get("network", ""),
+        network=patch.get("chain_name") or patch.get("network", ""),
         chain_id=int(patch.get("chain_id")),
         dest_id=(str(patch["dest_id"]) if patch.get("dest_id") not in (None, "") else None),
         addresses=_role_addresses(card, patch.get("addresses") or {}),
@@ -127,6 +140,15 @@ def _chain_row(manager, card: Card, patch, sources, web3_for, domains) -> Propos
     )
     if row.dest_id and not card.dest_id_label:
         return _refuse("chain_row", pid, "This card has no destination identifier column.")
+    # A card holds chains of its own network only. Decided from the chain registry's
+    # own data, never from the network name the agent typed.
+    family = network_for(row.chain_id) if network_for is not None else None
+    if network_for is not None and family is None:
+        return _refuse("chain_row", pid, f"Chain {row.chain_id} is not in the chain registry, "
+                       "so its network cannot be established.")
+    if family is not None and family != card.network:
+        return _refuse("chain_row", pid, f"Chain {row.chain_id} is a {family} chain; this is a "
+                       f"{card.network} card.")
 
     existing = card.row(row.chain_id)
     if existing is not None:
@@ -238,6 +260,9 @@ def _new_card(manager: CardManager, protocol_id: str, patch, sources, domains) -
     card = Card(
         protocol_id=protocol_id,
         protocol_name=patch.get("protocol_name", protocol_id),
+        network=patch.get("card_network") or patch.get("network") or "mainnet",
+        protocol_family=patch.get("protocol_family") or None,
+        protocol_version=patch.get("protocol_version") or None,
         docs=docs,
         supported_tokens=[str(t) for t in (patch.get("supported_tokens") or [])],
         dest_id_label=patch.get("dest_id_label") or None,
@@ -247,5 +272,15 @@ def _new_card(manager: CardManager, protocol_id: str, patch, sources, domains) -
     )
     if not card.address_labels:
         return _refuse("new_card", protocol_id, "A card needs at least one contract address column.")
+    # Only ever forward: a card for a version that is not newer than the latest one
+    # already known for this family and network would add nothing the agent may use.
+    latest = max((d.card for d in manager.list_cards()
+                  if d.card.family == card.family and d.card.network == card.network),
+                 key=lambda c: c.version_number, default=None)
+    if latest is not None and card.version_number <= latest.version_number:
+        return _refuse("new_card", protocol_id,
+                       f"{latest.protocol_id} already covers {card.family} "
+                       f"{latest.protocol_version or 'unversioned'} on {card.network}; a new card "
+                       "must be for a newer version.")
     manager.save_card(card)
     return ProposalResult(True, "new_card", protocol_id, card_version=1)
