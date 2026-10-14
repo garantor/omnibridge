@@ -1053,6 +1053,8 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
         with log.timed(f"simulate {pending.kind}"):
             plan, sim_res, _ = simulate_next(plan, sim, state["user_address"])
         fork_run, fork_note = _fork_check_plan(plan, sim, state["user_address"], sim_res, log)
+        if sim_res.success and not (fork_run is not None and not fork_run.success and fork_note is None):
+            _prepare_smart_account(plan, sim, state, src_info, log)
         plan_out = plan.model_dump()
         for later in plan.steps:
             if later.status.value == "PENDING_PREREQUISITE":
@@ -1137,6 +1139,86 @@ def simulator_node(state: GraphState) -> Dict[str, Any]:
         "fork_failure": fork_failed,
         "traces": traces,
     }
+
+
+def _prepare_smart_account(plan: Any, sim: Simulator, state: Dict[str, Any], src_info: Any, log: Any) -> None:
+    """
+    Offer the plan as one gasless-in-ETH signature, when the sender can take it.
+
+    Needs: a bundler configured for this chain (any ERC-4337 bundler serving EntryPoint
+    v0.7, see `omnibridge.aa.provider`); the sender switched to a MetaMask smart account on
+    this chain; an ERC-20 paymaster accepting the token being bridged; enough of it for the
+    transfer plus the gas-fee cap; and the exact batch passing on a fork. Any miss leaves
+    `plan.aa` unset and says why in `plan.aa_unavailable` — the step-by-step path still
+    works, so none of this can stop a transfer, only offer a better one.
+    """
+    from omnibridge.aa import provider
+    from omnibridge.aa.account import account_status
+    from omnibridge.aa.guard import build_batch
+    from omnibridge.core import erc20
+
+    def unavailable(reason: str) -> None:
+        plan.aa_unavailable = reason
+        log.value("smart account", f"not offered: {reason}")
+
+    try:
+        if not provider.configured(src_info.chain_id):
+            return unavailable("no bundler is configured (set AA_BUNDLER_URL, or PIMLICO_API_KEY)")
+    except provider.AaError as exc:
+        return unavailable(str(exc))
+    w3, _url = sim.connect_verified()
+    if w3 is None:
+        return unavailable("no identity-checked node to read the account from")
+    sender = state["user_address"]
+    status = account_status(w3, sender)
+    if not status.smart_account:
+        return unavailable(status.reason or status.kind)
+
+    pending = [st for st in plan.steps if st.tx_hash is None]
+    token = next((st.token_address for st in pending if st.kind == "approve" and st.token_address), None)
+    if token is None:
+        spend = ((state.get("route") or {}).get("quote_obj") or {}).get("extra_params", {}).get("spend") or {}
+        token = spend.get("token")
+    if not token:
+        return unavailable("the route pulls no ERC-20, so there is no token to pay gas in")
+
+    decimals = erc20.read_decimals(w3, token) or 6
+    try:
+        client = provider.AaClient(src_info.chain_id)
+        client.check_bundler()
+        fees = client.fee_plan(token, decimals)
+    except provider.AaError as exc:
+        return unavailable(str(exc))
+    fee_cap = fees.fee_cap
+
+    amount = sum(int(st.amount_raw or 0) for st in pending if st.kind != "approve")
+    balance = erc20.read_balance(w3, token, sender)
+    if balance is not None and balance < amount + fee_cap:
+        return unavailable(
+            f"the wallet holds {balance} base units; the transfer needs {amount} plus up to "
+            f"{fee_cap} for gas"
+        )
+
+    batch = build_batch(sender, src_info.chain_id, pending, token, fees.paymaster, fee_cap, fees.context)
+    with log.timed(f"fork-simulate the smart-account batch ({len(batch.calls)} calls)"):
+        run, why_not = sim.simulate_batch_on_fork(sender, batch.calls)
+    if run is None:
+        return unavailable(f"the batch could not be simulated on a fork: {why_not}")
+    if not run.success:
+        failure = run.first_failure
+        return unavailable(f"the batch reverted on a fork: {failure.revert_reason if failure else 'unknown'}")
+
+    plan.aa = {
+        **batch.as_dict(),
+        "token_decimals": decimals,
+        "fee_cap_display": f"{fee_cap / 10**decimals:.4f}",
+        "fork_gas_used": run.steps[-1].gas_used if run.steps else None,
+        "fee_basis": fees.basis,
+        "kind": status.kind,
+        "delegate": status.delegate,
+    }
+    log.ok(f"smart account: one signature, gas paid in the token (up to {plan.aa['fee_cap_display']}), "
+           "batch passed on a fork")
 
 
 def _fork_check_plan(plan: Any, sim: Simulator, sender: str, first_result: Any, log: Any):

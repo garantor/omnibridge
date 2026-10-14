@@ -251,3 +251,17 @@ class Simulator:
         except ForkUnavailable as exc:
             return None, str(exc)
 
+    def simulate_batch_on_fork(self, sender: str, calls: List[Any]) -> Tuple[Optional[Any], Optional[str]]:
+        """
+        Run a smart-account batch on a fork exactly as the account will: one call from the
+        account to itself carrying `execute(batch)`, which is what the EntryPoint's call
+        reduces to. The fork copies the account's real EIP-7702 delegation from chain, so
+        this checks the delegator, the encoding and every call together.
+        """
+        from omnibridge.aa.account import encode_batch
+        from omnibridge.core.fork import ForkStep
+
+        return self.simulate_sequence_on_fork(
+            sender, [ForkStep(to=sender, data=encode_batch(calls), label="smart-account batch")]
+        )
+

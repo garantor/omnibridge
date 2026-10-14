@@ -248,18 +248,71 @@ Verified live, with a scripted provider standing in for the model: on a testnet 
 code check and were saved `unverified`; a mainnet chain on the testnet card and a row on
 the V1 card were both refused; the V2 route matched the Arbitrum Sepolia row.
 
-## 8. Configuration
+## 8. Smart accounts: one signature, gas in USDC
+
+A MetaMask user who turns on **Switch to smart account** (MetaMask: account details)
+delegates their address, via EIP-7702, to MetaMask's `EIP7702StatelessDeleGator`. For such
+an address, Omnibridge offers the whole plan as one ERC-4337 UserOperation, with gas paid
+in USDC by an ERC-20 paymaster. Any bundler and paymaster that speak the standards work
+(see *Providers* below). Nothing else changes: same address, same funds,
+same recipient checks.
+
+**Why the user switches in MetaMask, not in Omnibridge.** A website cannot sign an EIP-7702
+authorization through a browser wallet (MetaMask's kit: "`signAuthorization` does not
+support JSON-RPC accounts"). Delegation is also per chain: switched on Arbitrum Sepolia
+means nothing on Base Sepolia.
+
+**How it runs**
+
+| Where | What |
+| --- | --- |
+| `simulator_node` → `_prepare_smart_account` | Reads the account's code (designator `0xef0100‖DeleGator`) and checks the DeleGator implements `execute(bytes32,bytes)`. Asks the configured bundler which chain it serves and that it supports EntryPoint v0.7. Gets the **fee cap** from code: sized from the paymaster's token quote when it offers one, otherwise the configured `AA_MAX_GAS_FEE` ceiling. Checks the balance covers the transfer plus the cap. Builds the batch: fee allowance for the paymaster, then the plan's steps. **Fork-simulates the exact batch** through the account's real delegation. Any miss sets `plan.aa_unavailable` with the reason, and the plan is signed step by step as before |
+| Approval screen | "One signature, gas paid in USDC, at most X", or why it isn't offered (e.g. "turn on Switch to smart account") |
+| Browser | MetaMask's own kit (`toMetaMaskSmartAccount`, `Stateless7702`) builds and signs the UserOperation, so the signature format is MetaMask's. viem's bundler and paymaster clients talk only to `/api/aa/rpc` |
+| `/api/aa/rpc` | Holds the provider URLs and keys. Sends bundler methods to the bundler and `pm_*` to the paymaster, and answers `omnibridge_getUserOperationGasPrice` itself. Refuses any UserOperation that isn't exactly the approved batch: other sender, other EntryPoint, other paymaster, other paymaster context, an account deployment, an EIP-7702 re-delegation, or any call added, removed, reordered or changed. Allows only bundler and paymaster methods |
+| Finish | The bundle's transaction hash goes through the same resume, broadcast, skill and card write-back as a directly signed one |
+
+**Pinned infrastructure** (from MetaMask's `@metamask/delegation-deployments`, checked on
+chain before use): DeleGator `0x63c0c19a282a1B52b07dD5a65b58948A07DAE32B`, EntryPoint v0.7
+`0x0000000071727De22E5E9d8BAf0edAc6f37da032`. The kit encodes multi-call batches in ERC-7579
+`BatchDefault` mode (`0x0100…`, revert on any failure), the only mode the guard accepts.
+
+**Verified on a fork of Arbitrum Sepolia:** with the delegation in place, approve plus V2
+`depositForBurn` ran as one call (123,805 gas), burned exactly 1 USDC, left no allowance, and
+the same call from another address was refused by the DeleGator.
+
+**Providers.** What is standard is used as is: ERC-4337 bundler methods and ERC-7677
+paymaster methods. Two things are not standard, so they are probed, never assumed:
+
+| Need | When the provider offers it | Otherwise |
+| --- | --- | --- |
+| Gas price for the UserOperation | `pimlico_getUserOperationGasPrice` on the bundler | Base fee × 2 + `eth_maxPriorityFeePerGas`, read through the bundler |
+| Token quote, to size the fee cap | `pimlico_getTokenQuotes` on the paymaster (also names the paymaster) | `AA_PAYMASTER_ADDRESS` and `AA_MAX_GAS_FEE` must be set; the cap is that ceiling |
+
+The ERC-7677 context is provider-specific, so it is configured (`AA_PAYMASTER_CONTEXT`,
+default `{"token": "{token}"}`), recorded in the approved batch, and the proxy refuses any
+other. Paymasters that charge through an EIP-2612 permit in `paymasterData` instead of an
+allowance granted in the batch are not supported.
+
+**Not yet verified live:** any real bundler and paymaster, and MetaMask signing the
+UserOperation. Both need a bundler configured and a switched MetaMask account.
+
+## 9. Configuration
 
 | Variable | Effect |
 | --- | --- |
 | `OMNIBRIDGE_DISABLE_AGENT_TOOLS=1` | Discovery runs without the toolkit (cards are still shown) |
 | `OMNIBRIDGE_CARD_AUTHORITY=1` | A verified card row may stand in for the documentation source |
 | `anvil` on `PATH` or in `~/.foundry/bin` | Enables forked simulation; without it, plain `eth_call` |
+| `AA_BUNDLER_URL` (or `AA_BUNDLER_URL_<chainId>`) | Enables one-signature smart-account signing with gas in USDC (section 8); without it, step-by-step signing with ETH. `{chain_id}` is replaced |
+| `AA_PAYMASTER_URL`, `AA_BUNDLER_HEADERS`, `AA_PAYMASTER_HEADERS`, `AA_PAYMASTER_CONTEXT` | Paymaster endpoint (default: the bundler's), extra HTTP headers, and the ERC-7677 context |
+| `AA_PAYMASTER_ADDRESS`, `AA_MAX_GAS_FEE` | Required when the paymaster offers no token quote; `AA_MAX_GAS_FEE` also caps a quoted fee |
+| `PIMLICO_API_KEY` | Shorthand for Pimlico's bundler and paymaster when `AA_BUNDLER_URL` is unset |
 
 CLI: `omnibridge cards list`; `omnibridge cards check <id>` re-runs the code check,
 report-only.
 
-## 9. Found while building
+## 10. Found while building
 
 - **A rejected proposal escaped the graph as an exception.** The docstring said the retry
   path handled it; in fact the run ended in ERROR. It now returns to discovery with the
@@ -275,7 +328,7 @@ report-only.
   word per chain, so "Arbitrum Sepolia" became "Arbitrum", which is ambiguous on testnet.
   Hyphenated names now work.
 
-## 10. Open decisions
+## 11. Open decisions
 
 1. **Rule B.** Hand-seeded cards are authored knowledge. The proposed wording from
    [PROTOCOL_CARDS.md](PROTOCOL_CARDS.md) section 2 ("authored knowledge enters as a lead,

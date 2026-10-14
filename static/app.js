@@ -1066,6 +1066,95 @@ export OMNIBRIDGE_MODEL=...            # optional; must be a model your key can 
     },
   };
 
+  // The one-signature form of the plan, when the server could offer it, and why not
+  // when it could not. The gas cap is the allowance the batch grants the paymaster:
+  // computed by code (from the paymaster's quote, or the configured ceiling), and the
+  // most that can be taken.
+  function renderSmartAccount(plan) {
+    if (!plan) return "";
+    if (plan.aa) {
+      const aa = plan.aa;
+      return `
+        <div class="banner banner-green">
+          <strong>One signature, gas paid in USDC.</strong> Your smart account runs all
+          ${esc(aa.calls.length)} calls together — the approval can never land without the
+          bridge call. Gas comes out of your USDC, <strong>at most ${esc(aa.fee_cap_display)}</strong>,
+          via the paymaster${aa.fee_basis === "ceiling" ? " (the configured ceiling)" : ""}; no ETH needed. The exact batch passed on a fork${aa.fork_gas_used ? ` (${esc(aa.fork_gas_used)} gas)` : ""}.
+        </div>`;
+    }
+    if (plan.aa_unavailable) {
+      return `<p class="telemetry-note">Signing step by step with ETH for gas. One-signature smart-account signing is not available: ${esc(plan.aa_unavailable)}.${
+        /not switched to a smart account/.test(plan.aa_unavailable)
+          ? " To enable it, turn on <em>Switch to smart account</em> for this account in MetaMask on this network."
+          : ""}</p>`;
+    }
+    return "";
+  }
+
+  // Build, sign and send the batch as an ERC-4337 UserOperation through MetaMask's own
+  // smart-account kit, so the signature format is MetaMask's. Bundler and paymaster calls
+  // go through /api/aa/rpc, which holds the provider's keys and refuses any UserOperation that
+  // is not exactly the batch the server simulated. Returns the bundle's transaction hash.
+  const VIEM = "https://esm.sh/viem@2.57.1";
+  const AA_KIT = "https://esm.sh/@metamask/smart-accounts-kit@2.0.0?deps=viem@2.57.1";
+
+  async function aaRpc(method, params) {
+    const res = await fetch("/api/aa/rpc", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: currentThreadId, method, params: params || [] }),
+    });
+    const body = await res.json();
+    if (body.error) throw new Error(body.error.message || "bundler error");
+    return body.result;
+  }
+
+  async function sendSmartAccountBatch(aa, wallet, fromAddress, onStatus) {
+    const meta = currentSourceChainMeta;
+    if (!meta || !meta.rpc_url) throw new Error("the source chain's details are missing");
+    const [viem, aaMod, kit] = await Promise.all([
+      import(VIEM), import(`${VIEM}/account-abstraction`), import(AA_KIT),
+    ]);
+    const chain = viem.defineChain({
+      id: Number(aa.chain_id), name: meta.name,
+      nativeCurrency: { name: meta.native_symbol || "ETH", symbol: meta.native_symbol || "ETH", decimals: 18 },
+      rpcUrls: { default: { http: [meta.rpc_url] } },
+    });
+    const publicClient = viem.createPublicClient({ chain, transport: viem.http(meta.rpc_url) });
+    const walletClient = viem.createWalletClient({ account: fromAddress, chain, transport: viem.custom(wallet.provider) });
+    const account = await kit.toMetaMaskSmartAccount({
+      client: publicClient,
+      implementation: kit.Implementation.Stateless7702,
+      address: fromAddress,
+      signer: { walletClient },
+    });
+    const proxy = viem.custom({ request: ({ method, params }) => aaRpc(method, params) });
+    const bundler = aaMod.createBundlerClient({
+      client: publicClient,
+      transport: proxy,
+      paymaster: aaMod.createPaymasterClient({ transport: proxy }),
+      // Exactly the context the server approved; the proxy refuses any other.
+      paymasterContext: aa.paymaster_context || { token: aa.token },
+      // Bundlers reject fees below their own price, so take it from the server, which
+      // asks the configured bundler in whatever way that bundler supports.
+      userOperation: {
+        estimateFeesPerGas: async () => {
+          const g = await aaRpc("omnibridge_getUserOperationGasPrice", []);
+          return { maxFeePerGas: BigInt(g.maxFeePerGas), maxPriorityFeePerGas: BigInt(g.maxPriorityFeePerGas) };
+        },
+      },
+    });
+    onStatus("Confirm the smart-account signature in your wallet…");
+    const hash = await bundler.sendUserOperation({
+      account,
+      calls: aa.calls.map((c) => ({ to: c.to, value: BigInt(c.value), data: c.data })),
+    });
+    onStatus("Submitted — waiting for the bundler to include it…");
+    const receipt = await bundler.waitForUserOperationReceipt({ hash, timeout: 180000 });
+    if (!receipt.success) throw new Error(`the UserOperation ${hash} reverted on chain`);
+    return receipt.receipt.transactionHash;
+  }
+
   function renderPlan(plan) {
     if (!plan || !plan.steps || plan.steps.length < 2) return "";
     return `
@@ -1127,6 +1216,7 @@ export OMNIBRIDGE_MODEL=...            # optional; must be a model your key can 
 
         ${renderAmountCheck(amount)}
         ${renderThirdPartyRecipient(data.parties)}
+        ${renderSmartAccount(data.plan)}
         ${renderPlan(data.plan)}
 
         <div class="manifest-grid">
@@ -1418,6 +1508,28 @@ export OMNIBRIDGE_MODEL=...            # optional; must be a model your key can 
     ];
 
     let realTxHash = null;
+
+    // Smart-account path: every step in one UserOperation, gas in USDC. Only for the
+    // wallet the batch was built and simulated for; anything else signs step by step.
+    const aa = currentPlan && currentPlan.aa;
+    if (aa && aa.sender.toLowerCase() === fromAddress.toLowerCase()) {
+      try {
+        realTxHash = await sendSmartAccountBatch(aa, primaryWallet, fromAddress, (text) => {
+          signBtn.innerHTML = `<span>${esc(text)}</span>`;
+        });
+        steps.forEach((st) => { if (!st.tx_hash) st.tx_hash = realTxHash; });
+      } catch (err) {
+        signBtn.disabled = false;
+        signBtn.innerHTML = `<span>Sign in Wallet & Broadcast</span><span>🚀</span>`;
+        setStepActive(5);
+        outputSection.insertAdjacentHTML("afterbegin",
+          `<div class="banner banner-rose"><strong>Smart-account signing failed:</strong>
+           ${esc(err.message || String(err))}. The batch is all-or-nothing, so nothing was
+           partly sent. Try again, or sign step by step from a wallet without the
+           smart-account switch.</div>`);
+        return;
+      }
+    }
 
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];

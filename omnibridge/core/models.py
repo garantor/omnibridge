@@ -162,6 +162,12 @@ class ExecutionPlan(BaseModel):
     """
 
     steps: List[TransactionStep] = Field(default_factory=list)
+    # The smart-account form of this plan, when the sender can use one: every unsigned
+    # step plus the paymaster's gas-fee allowance, as one atomic batch that was simulated
+    # on a fork. None when unavailable; `aa_unavailable` then says why, and the plan is
+    # signed step by step as before.
+    aa: Optional[Dict[str, Any]] = None
+    aa_unavailable: Optional[str] = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

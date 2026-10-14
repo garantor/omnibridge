@@ -585,6 +585,81 @@ def list_skills():
     ]
 
 
+class AaRpcRequest(BaseModel):
+    """One bundler or paymaster JSON-RPC call, for the run named by thread_id."""
+
+    thread_id: str
+    method: str
+    params: list = Field(default_factory=list)
+    id: Optional[int] = 1
+
+
+#: Calls that carry a UserOperation. Each is checked against the run's approved batch.
+_AA_OP_METHODS = {
+    "eth_estimateUserOperationGas", "eth_sendUserOperation",
+    "pm_getPaymasterStubData", "pm_getPaymasterData",
+}
+#: Read-only calls the kit needs while it waits.
+_AA_READ_METHODS = {
+    "eth_getUserOperationReceipt", "eth_getUserOperationByHash",
+    "eth_supportedEntryPoints",
+}
+#: Answered here from the provider module, so the page needs no provider-specific call.
+_AA_GAS_PRICE_METHOD = "omnibridge_getUserOperationGasPrice"
+
+
+def _rpc_error(req: "AaRpcRequest", message: str, code: int = -32000) -> dict:
+    return {"jsonrpc": "2.0", "id": req.id, "error": {"code": code, "message": message}}
+
+
+@server_app.post("/api/aa/rpc")
+def aa_rpc(req: AaRpcRequest):
+    """
+    The browser's bundler and paymaster transport, with the provider's URLs and keys kept here.
+
+    Only for a run whose plan carries an approved smart-account batch, and only for a
+    UserOperation that is exactly that batch: the run's wallet as sender, EntryPoint
+    v0.7, the quoted paymaster, no account deployment or re-delegation, and the same
+    calls in the same order. A page that swapped a call gets an error, not a signature
+    request that the bundler would have carried.
+
+    Bundler methods go to the configured bundler, `pm_*` to the configured paymaster
+    (the same endpoint unless AA_PAYMASTER_URL says otherwise).
+    """
+    from omnibridge.aa import provider
+    from omnibridge.aa.guard import ApprovedBatch, check_paymaster_context, check_user_operation
+
+    values = graph.get_state({"configurable": {"thread_id": req.thread_id}}).values or {}
+    aa = (values.get("plan") or {}).get("aa")
+    if not aa:
+        return _rpc_error(req, "This run has no approved smart-account batch.")
+    approved = ApprovedBatch.from_dict(aa)
+
+    if req.method == "eth_chainId":
+        return {"jsonrpc": "2.0", "id": req.id, "result": hex(approved.chain_id)}
+    if req.method in _AA_OP_METHODS:
+        op = req.params[0] if req.params else {}
+        entry_point = req.params[1] if len(req.params) > 1 else None
+        problems = check_user_operation(op if isinstance(op, dict) else {}, approved, entry_point)
+        if req.method.startswith("pm_"):
+            context = req.params[3] if len(req.params) > 3 else None
+            problems += check_paymaster_context(context, approved)
+        if problems:
+            return _rpc_error(req, "Refused: " + " ".join(problems))
+    elif req.method not in _AA_READ_METHODS and req.method != _AA_GAS_PRICE_METHOD:
+        return _rpc_error(req, f"{req.method} is not available through this proxy.", code=-32601)
+
+    try:
+        client = provider.AaClient(approved.chain_id)
+        if req.method == _AA_GAS_PRICE_METHOD:
+            result = client.gas_price().as_rpc()
+        else:
+            result = client.rpc(req.method, req.params)
+    except provider.AaError as exc:
+        return _rpc_error(req, str(exc))
+    return {"jsonrpc": "2.0", "id": req.id, "result": result}
+
+
 @server_app.get("/api/cards")
 def list_cards():
     """
